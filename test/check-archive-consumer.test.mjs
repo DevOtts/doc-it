@@ -25,7 +25,7 @@ test('T-K1-02 [REAL] check archive on a read-only copy of a consumer plan home: 
     config(copy, { roles: { program: ['.'] } });
     const copyBefore = snapshot(copy);
     const r = run(['check', 'archive', '--root', copy, '--json']);
-    console.log(r.out);
+    { const j0 = JSON.parse(r.out); console.log(`done_unclosed=${j0.done_unclosed.length} done_without_closeout=${j0.done_without_closeout.length} stale_active=${j0.stale_active.length} unowned=${j0.unowned.length}`); }
     assert.equal(r.code, 1, r.err);
     const j = JSON.parse(r.out);
     assert.equal(j.done_unclosed.length, 3, JSON.stringify(j.done_unclosed));
