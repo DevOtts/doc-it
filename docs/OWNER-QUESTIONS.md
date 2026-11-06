@@ -1,5 +1,7 @@
 # doc-it: owner questions before standard v1
 
+**Status (2026-11-06): questions 1-5 answered with their recommendations by do-it 1.1 decision D13 and applied in STANDARD v0.1 section 4.**
+
 Each has a recommendation. These decide the standard for every project that adopts doc-it, not just the pilot.
 
 1. **Roles and tiers.** Adopt the eight roles and six tiers in `STANDARD.md` §1–§2 as written? **Recommend yes.**

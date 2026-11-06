@@ -1,6 +1,6 @@
-# doc-it standard v0 (draft, 2026-11-06)
+# doc-it standard v0.1 (2026-11-06)
 
-Project-neutral. A project adopts it by mapping its own folders to the roles in §1; everything else applies unchanged. Defaults are marked and can be overridden per project in `.doc-it/config.json` (written by doc-it's first-run interview). Each rule cites the lesson it comes from (`LEARNINGS.md`).
+Project-neutral. Version 0.1 applies the owner rulings D13 (OWNER-QUESTIONS 1-5, each with its recommendation). A project adopts it by mapping its own folders to the roles in §1; everything else applies unchanged. Defaults are marked and can be overridden per project in `.doc-it/config.json` (written by doc-it's first-run interview). Each rule cites the lesson it comes from (`LEARNINGS.md`).
 
 ## 1. Roles
 
@@ -23,20 +23,49 @@ Every factual claim an analysis makes carries the tier of its source, from the t
 
 ## 3. Rules
 
-| ID | Rule | From |
-|---|---|---|
-| DS-1 | **One home per fact kind.** A one-home map names the owning role and path for each kind of fact. Other places link to it and never restate it. A restatement that disagrees with its owner is flagged | L5 |
-| DS-2 | **Status is derived.** A board states only what evidence supports (merged PR, sha reachable from the default branch, deploy record), or prints its own age and last-evidence date on its first line | L3 |
-| DS-3 | **Archive only through a closeout.** Moving a program to the archive requires a guarded close (board closed with every task verified or an owner note) or a `CLOSEOUT.md` listing every piece as shipped (with evidence), dropped, or carried over (with a backlog link). Folder location alone never means "shipped" | L2 |
-| DS-4 | **`current` expires.** A durable doc whose `verified:` is older than the limit (default 60 days) drops to `needs-review` by rule | L1 |
-| DS-5 | **Program docs record what they read.** A study or plan lists the `repo@sha` paths it was grounded on; when code at those paths changes, the doc is flagged for review. When a program ships or is superseded it gets a banner pointing to where the truth now lives | L6 |
-| DS-6 | **Read current code.** Before analysis, every checkout read is compared with its remote; a checkout that is behind is refused or read through `origin/<default>` | L8 |
-| DS-7 | **Measure before redesigning.** A docs task first finds the existing conventions and measures how well they are kept | L7 |
-| DS-8 | **Every rule ships as a check.** Each rule above has a script; consumers run them (conclude-it at session close, plan-it at pre-grounding). A rule with no running check is not part of the standard | L1 |
+| ID | Rule | From | In 0.1.0 |
+|---|---|---|---|
+| DS-1 | **One home per fact kind.** A one-home map names the owning role and path for each kind of fact. Other places link to it and never restate it. A restatement that disagrees with its owner is flagged | L5 | not yet checked |
+| DS-2 | **Status is derived.** A board states only what evidence supports (merged PR, sha reachable from the default branch, deploy record), or prints its own age and last-evidence date on its first line | L3 | half checked: board age (`check archive` stale_active); evidence derivation not yet checked |
+| DS-3 | **Archive only through a closeout.** Moving a program to the archive requires a guarded close (board closed with every task verified or an owner note) or a `CLOSEOUT.md` listing every piece as shipped (with evidence), dropped, or carried over (with a backlog link). Folder location alone never means "shipped" | L2 | checked (`check archive`, `check closeout`) |
+| DS-4 | **`current` expires.** A durable doc whose `verified:` is older than the limit (default 60 days) drops to `needs-review` by rule | L1 | checked (`check expiry`) |
+| DS-5 | **Program docs record what they read.** A study or plan lists the `repo@sha` paths it was grounded on; when code at those paths changes, the doc is flagged for review. When a program ships or is superseded it gets a banner pointing to where the truth now lives | L6 | not yet checked |
+| DS-6 | **Read current code.** Before analysis, every checkout read is compared with its remote; a checkout that is behind is refused or read through `origin/<default>` | L8 | checked (`check checkout`) |
+| DS-7 | **Measure before redesigning.** A docs task first finds the existing conventions and measures how well they are kept | L7 | not yet checked (a practice, no script) |
+| DS-8 | **Every rule ships as a check.** Each rule above has a script; consumers run them (conclude-it at session close, plan-it at pre-grounding). A rule with no running check is not part of the standard | L1 | not yet checked (meta rule; holds only for rules marked checked) |
 
-## 4. Not in v0
+## 4. Decisions applied in 0.1 (D13)
 
-Thresholds beyond DS-4's default, the config schema, the check scripts and their exit codes, and how pointers (memory) are pruned. These are designed with the plugin.
+1. **Roles and tiers.** The eight roles (§1) and six tiers (§2) are adopted as written. The tier enum is `live`, `code`, `generated`, `durable`, `program`, `pointer`, printed by `doc-it tiers --json`.
+2. **One archive.** One archive folder, reachable only through a guarded close or a `CLOSEOUT.md` (DS-3). No split into "shipped" and "stopped"; the closeout row dispositions (`shipped`, `dropped`, `carried`) carry that distinction.
+3. **One board format.** `status.json` plus a generated `STATUS.md` whose first line shows age and last-evidence date, for active programs. Archived programs carry the closeout instead. A board is *closed* when its `status.json` has `"closed": true`.
+4. **Expired docs.** When DS-4 is first applied to a project, every expired doc is downgraded to `needs-review` at once. `doc-it check expiry` only reports; the downgrade is a separate, deliberate edit.
+5. **Expiry default.** 60 days, overridable per project (`expiry_days`).
+
+## 5. Config and exit codes (0.1)
+
+`.doc-it/config.json`, written by `doc-it init`:
+
+```json
+{ "version": 1,
+  "roles": { "program": ["docs/plans"], "archive": ["docs/plans/0-done"], "durable": ["docs/reference"] },
+  "expiry_days": 60, "stale_hours": 72 }
+```
+
+- `roles` maps a role (§1) to paths relative to the repo root. `archive` defaults to `<program path>/0-done`. A top-level folder that no role covers is reported as **unowned**.
+- All checks exit 0 clean, 1 findings, 2 config or usage error. A missing config is exit 2 with "run doc-it init".
+
+### Check semantics
+
+- **Archive (DS-3).** Each direct subfolder of an archive path is a package. `status.json` with `closed` not `true` is `done_unclosed`. No `status.json` and no `CLOSEOUT.md` is `done_without_closeout`. A package with a closed board, or a CLOSEOUT, is clean (lint the CLOSEOUT separately with `check closeout`).
+- **Stale board (DS-2, board-age half).** An active package (direct subfolder of a program path, outside the archive, not a numbered `N-done` or `N-backlog` bucket) with an open board is `stale_active` when its `updated_at` is older than `stale_hours` (default 72) *and* some other file in the package is newer than `updated_at`. The board claims nothing it cannot support, so work after the last update means the board is behind. Evidence derivation (merged PR, sha reachable) is not checked in 0.1.0.
+- **CLOSEOUT (DS-3).** A table `Piece | Disposition | Evidence or reason | Backlog link`, one row per piece: `shipped` needs evidence, `dropped` a reason, `carried` a backlog link (path or URL). Template: `doc-it template closeout`.
+- **Checkout (DS-6).** `origin` is fetched, then HEAD is compared with `origin/<default>`; behind is exit 1 naming both shas. Uncommitted working-tree changes are reported, not failed.
+- **Expiry (DS-4).** Markdown under the durable role with `verified: YYYY-MM-DD` older than `expiry_days` is reported, as is any doc with no `verified:`. Never rewrites.
+
+## 6. Not yet in the standard
+
+Checks for DS-1, DS-5, the evidence half of DS-2, and how pointers (memory) are pruned.
 
 ---
 _Authored by [DevOtts](https://github.com/DevOtts)._

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "doc-it",
+  "owner": {
+    "name": "DevOtts",
+    "url": "https://github.com/DevOtts"
+  },
+  "description": "doc-it: the documentation standard of the DevOtts *-it harness, shipped as checks (archive closeout, checkout freshness, expiry, source tiers).",
+  "plugins": [
+    {
+      "name": "doc-it",
+      "source": "./plugins/doc-it",
+      "version": "0.1.0",
+      "description": "Which doc may an agent trust? Source tiers, a CLOSEOUT template and lint, and read-only checks for archive, checkout and expiry. Zero dependencies.",
+      "author": { "name": "DevOtts", "url": "https://github.com/DevOtts" },
+      "homepage": "https://github.com/DevOtts/doc-it",
+      "license": "MIT",
+      "keywords": ["documentation", "archive", "closeout", "source-tiers", "claude-code"]
+    }
+  ]
+}

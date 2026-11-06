@@ -1,0 +1,10 @@
+{
+  "name": "doc-it",
+  "description": "Documentation standard and checks for the DevOtts *-it harness: source tiers, CLOSEOUT template and lint, read-only checks for archive, checkout freshness and doc expiry. Zero dependencies.",
+  "version": "0.1.0",
+  "author": { "name": "DevOtts", "url": "https://github.com/DevOtts" },
+  "homepage": "https://github.com/DevOtts/doc-it",
+  "repository": "https://github.com/DevOtts/doc-it",
+  "license": "MIT",
+  "keywords": ["documentation", "archive", "closeout", "source-tiers", "claude-code"]
+}

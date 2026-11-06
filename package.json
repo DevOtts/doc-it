@@ -1,0 +1,13 @@
+{
+  "name": "doc-it",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Documentation standard and checks for the DevOtts *-it harness. Zero dependencies.",
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "author": "DevOtts (https://github.com/DevOtts)",
+  "license": "MIT"
+}
