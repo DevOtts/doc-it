@@ -37,7 +37,7 @@ Or run the CLI directly: `node scripts/doc-it.mjs <command>` (Node 18+, no depen
 | Command | Does | Exit |
 |---|---|---|
 | `doc-it init [--yes] [--program p,..] [--archive p,..] [--durable p,..] ...` | writes `.doc-it/config.json` (interview, or flags) | 0 |
-| `doc-it check archive [--root R] [--stale-hours N] [--json]` | `done_unclosed`, `done_without_closeout`, `stale_active`, `unowned` (DS-3, DS-2 age) | 0 / 1 / 2 |
+| `doc-it check archive [--root R] [--stale-hours N] [--summary] [--json]` | `done_unclosed`, `done_without_closeout`, `stale_active`, `unowned` (DS-3, DS-2 age) | 0 / 1 / 2 |
 | `doc-it check closeout <file>` | lint a CLOSEOUT: shipped needs evidence, dropped a reason, carried a backlog link | 0 / 1 / 2 |
 | `doc-it check checkout <repo...>` | HEAD vs `origin/<default>`; behind names both shas (DS-6) | 0 / 1 / 2 |
 | `doc-it check expiry [--root R] [--json]` | durable docs with `verified:` older than `expiry_days` (default 60); report only (DS-4) | 0 / 1 / 2 |

@@ -58,11 +58,13 @@ Every command accepts --help. Exit: 0 clean, 1 findings, 2 config or usage error
   init: `doc-it init [--root <dir>] [--yes] [--force] [--<role> <path,path>]... [--expiry-days N] [--stale-hours N]
 Roles: ${ROLES.join(', ')}. Without flags, asks a short interview (plans/archive/durable first). With --yes or any role flag, runs non-interactively.
 The plans role is "program". Archive defaults to <program path>/0-done when not given.`,
-  archive: `doc-it check archive [--root <dir>] [--stale-hours N] [--json]
+  archive: `doc-it check archive [--root <dir>] [--stale-hours N] [--summary] [--json]
+--summary: counts per finding kind, done_unclosed in full, at most 10 entries of every other list ("+N more"). JSON keeps all lists.
+Config field archive_since (YYYY-MM-DD, default unset): archive packages whose last commit (or newest file mtime outside git) predates it are not listed; they are counted in legacy_count.
 Read-only. Reports done_unclosed (archive package whose status.json has closed:false), done_without_closeout (no status.json and no CLOSEOUT.md), stale_active (active package whose board updated_at is older than --stale-hours while newer files exist) and unowned (top-level paths with no role).
 Exit 0 clean, 1 findings, 2 config missing ("run doc-it init") or usage error.`,
-  closeout: `doc-it check closeout <file> [--json]
-Lints a CLOSEOUT.md table: one row per piece; shipped needs evidence, dropped needs a reason, carried needs a backlog link. Failure names the row. Exit 0 / 1 / 2.`,
+  closeout: `doc-it check closeout <file> [--root <dir>] [--json]
+Lints a CLOSEOUT.md table: one row per piece; shipped needs evidence, dropped needs a reason, carried needs a backlog link: an existing relative path (from the CLOSEOUT's folder or the repo root) or an http(s) URL. Failure names the row. Exit 0 / 1 / 2.`,
   checkout: `doc-it check checkout <repo...> [--no-fetch] [--json]
 For each repo: fetch origin (unless --no-fetch), compare HEAD with origin/<default>. Exit 1 when behind, naming the local and remote sha. Also reports uncommitted changes in the working tree.`,
   expiry: `doc-it check expiry [--root <dir>] [--today YYYY-MM-DD] [--expiry-days N] [--json]
@@ -82,7 +84,7 @@ function parseArgs(argv) {
       if (eq > 0) { flags[a.slice(2, eq)] = a.slice(eq + 1); continue; }
       const k = a.slice(2);
       const next = argv[i + 1];
-      if (['json', 'yes', 'force', 'help', 'no-fetch'].includes(k) || next === undefined || next.startsWith('--')) flags[k] = true;
+      if (['json', 'yes', 'force', 'help', 'no-fetch', 'summary'].includes(k) || next === undefined || next.startsWith('--')) flags[k] = true;
       else { flags[k] = next; i++; }
     } else pos.push(a);
   }
@@ -107,6 +109,7 @@ function loadConfig(root) {
     if (!ROLES.includes(r)) throw new Usage(`unknown role "${r}" in config.json (roles: ${ROLES.join(', ')})`);
     if (!Array.isArray(v) || v.some((x) => typeof x !== 'string')) throw new Usage(`role "${r}" must be an array of paths`);
   }
+  if (cfg.archive_since !== undefined && cfg.archive_since !== null && (typeof cfg.archive_since !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(cfg.archive_since) || Number.isNaN(Date.parse(cfg.archive_since + 'T00:00:00Z')))) throw new Usage('archive_since in config.json must be YYYY-MM-DD');
   return { expiry_days: DEFAULTS.expiry_days, stale_hours: DEFAULTS.stale_hours, ...cfg };
 }
 const rolePaths = (cfg, role) => (cfg.roles[role] || []);
@@ -187,13 +190,25 @@ function topLevelUnowned(root, cfg) {
   return unowned;
 }
 
+// Last-touched time of a package: last commit when tracked in git, else newest file mtime.
+function lastTouchedMs(root, dir) {
+  try {
+    const t = execFileSync('git', ['log', '-1', '--format=%ct', '--', dir], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (t) return Number(t) * 1000;
+  } catch { /* not a git repo */ }
+  return newestMtime(dir, null);
+}
+
 function checkArchive(root, cfg, staleHours) {
   const res = { done_unclosed: [], done_without_closeout: [], stale_active: [], unowned: [] };
+  const since = cfg.archive_since ? Date.parse(cfg.archive_since + 'T00:00:00Z') : null;
+  let legacy = 0;
   const archives = archivePaths(cfg).map((p) => abs(root, p));
   for (const a of archives) {
     for (const name of subdirs(a)) {
       const dir = path.join(a, name);
       const rel = path.relative(root, dir);
+      if (since !== null && lastTouchedMs(root, dir) < since) { legacy++; continue; }
       const board = readBoard(dir);
       if (board) { if (board.__invalid || board.closed !== true) res.done_unclosed.push(rel); }
       else if (!isFile(path.join(dir, 'CLOSEOUT.md'))) res.done_without_closeout.push(rel);
@@ -217,6 +232,7 @@ function checkArchive(root, cfg, staleHours) {
     }
   }
   res.unowned = topLevelUnowned(root, cfg);
+  if (since !== null) res.legacy_count = legacy;
   return res;
 }
 
@@ -225,10 +241,18 @@ function cmdCheckArchive(flags) {
   const cfg = loadConfig(root);
   const staleHours = flags['stale-hours'] ? num(flags['stale-hours'], '--stale-hours') : cfg.stale_hours;
   const res = checkArchive(root, cfg, staleHours);
-  const n = Object.values(res).reduce((s, a) => s + a.length, 0);
+  const n = Object.values(res).reduce((s, a) => s + (Array.isArray(a) ? a.length : 0), 0);
   if (flags.json) out(JSON.stringify(res, null, 2));
   else {
-    const sect = (k, title) => { if (res[k].length) { out(`${title} (${res[k].length}):`); res[k].forEach((x) => out(`  ${x}`)); } };
+    const cap = (k) => (flags.summary && k !== 'done_unclosed' ? 10 : Infinity);
+    const sect = (k, title) => {
+      if (!res[k].length) return;
+      out(`${title} (${res[k].length}):`);
+      res[k].slice(0, cap(k)).forEach((x) => out(`  ${x}`));
+      if (res[k].length > cap(k)) out(`  +${res[k].length - cap(k)} more`);
+    };
+    if (flags.summary) out(`summary: ${Object.keys(res).filter((k) => Array.isArray(res[k])).map((k) => `${k}=${res[k].length}`).join(' ')}${res.legacy_count !== undefined ? ` legacy_count=${res.legacy_count}` : ''}`);
+    else if (res.legacy_count) out(`legacy_count=${res.legacy_count} (before archive_since ${cfg.archive_since})`);
     sect('done_unclosed', 'archived but board not closed');
     sect('done_without_closeout', 'archived with no board and no CLOSEOUT.md');
     sect('stale_active', 'active board older than stale limit while newer files exist');
@@ -241,7 +265,17 @@ function cmdCheckArchive(flags) {
 // ---------- check closeout ----------
 const PLACEHOLDER = /^(<[^>]*>|todo|tbd|n\/a|-+|\?+)?$/i;
 const blank = (s) => PLACEHOLDER.test(s.trim());
-function lintCloseout(text) {
+// A backlog link is an http(s) URL or a relative path that exists (from the CLOSEOUT's folder or the repo root).
+function validLink(raw, bases) {
+  let l = raw.trim().replace(/`/g, '');
+  const md = l.match(/^\[[^\]]*\]\(([^)]+)\)$/);
+  if (md) l = md[1].trim();
+  if (/^https?:\/\/[^\s/]+\.?\S*$/i.test(l)) return true;
+  l = l.split('#')[0];
+  if (!l || /^[a-z][a-z0-9+.-]*:/i.test(l) || path.isAbsolute(l)) return false;
+  return bases.some((b) => { try { return fs.existsSync(path.resolve(b, l)); } catch { return false; } });
+}
+function lintCloseout(text, bases = []) {
   const problems = []; let rows = 0;
   const lines = text.replace(/<!--[\s\S]*?-->/g, '').split('\n');
   let cols = null;
@@ -263,16 +297,21 @@ function lintCloseout(text) {
     if (disp === 'shipped') { if (blank(detail)) problems.push(`row "${piece}": shipped needs evidence`); }
     else if (disp === 'dropped') { if (blank(detail)) problems.push(`row "${piece}": dropped needs a reason`); }
     else if (disp === 'carried') {
-      if (blank(link) || !/[\/#]|\.md|https?:/.test(link)) problems.push(`row "${piece}": carried needs a backlog link`);
+      if (blank(link) || !validLink(link, bases)) problems.push(`row "${piece}": carried needs a backlog link (an existing relative path or an http(s) URL; got "${link}")`);
     } else problems.push(`row "${piece}": disposition must be shipped, dropped or carried (got "${cells[cols.disp] || ''}")`);
   }
   if (rows === 0) problems.push('no piece rows found (expected a table with columns Piece | Disposition | Evidence or reason | Backlog link)');
   return { rows, problems };
 }
+function repoRoot(dir) {
+  try { return execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return process.cwd(); }
+}
 function cmdCheckCloseout(flags, pos) {
   if (!pos[0]) throw new Usage('usage: doc-it check closeout <file>');
   if (!isFile(pos[0])) throw new Usage(`not a file: ${pos[0]}`);
-  const r = lintCloseout(fs.readFileSync(pos[0], 'utf8'));
+  const file = path.resolve(pos[0]);
+  const bases = [path.dirname(file), path.resolve(flags.root || repoRoot(path.dirname(file)))];
+  const r = lintCloseout(fs.readFileSync(file, 'utf8'), bases);
   if (flags.json) out(JSON.stringify(r, null, 2));
   else if (r.problems.length) r.problems.forEach((p) => out(`FAIL ${p}`));
   else out(`ok: ${r.rows} piece(s)`);

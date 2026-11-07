@@ -59,3 +59,58 @@ test('T-K1-01 --help exits 0 on every command', () => {
     assert.ok(r.out.length > 20);
   }
 });
+
+function legacyFixture(root, { extra = 0 } = {}) {
+  config(root, { roles: { program: ['plans'] }, archive_since: '2026-01-01' });
+  const old = new Date('2025-06-01T00:00:00Z');
+  for (let i = 0; i < 12 + extra; i++) {
+    const f = path.join(root, `plans/0-done/old${i}/PLAN.md`);
+    write(f, 'x'); fs.utimesSync(f, old, old);
+    fs.utimesSync(path.dirname(f), old, old);
+  }
+  write(path.join(root, 'plans/0-done/recent-unclosed/status.json'), JSON.stringify({ closed: false }));
+  write(path.join(root, 'plans/0-done/recent-bare/README.md'), 'x');
+}
+
+test('T-K1-01 archive_since moves packages older than the date into legacy_count, out of the lists', () => {
+  const root = tmp();
+  try {
+    legacyFixture(root);
+    const r = run(['check', 'archive', '--root', root, '--json']);
+    assert.equal(r.code, 1, r.err);
+    const j = JSON.parse(r.out);
+    assert.equal(j.legacy_count, 12);
+    assert.deepEqual(j.done_without_closeout, ['plans/0-done/recent-bare']);
+    assert.deepEqual(j.done_unclosed, ['plans/0-done/recent-unclosed']);
+    const bad = tmp();
+    try { config(bad, { roles: { program: ['plans'] }, archive_since: 'last week' }); assert.equal(run(['check', 'archive', '--root', bad]).code, 2); } finally { rm(bad); }
+  } finally { rm(root); }
+});
+
+test('T-K1-01 without archive_since there is no legacy_count and every package is listed', () => {
+  const root = tmp();
+  try {
+    config(root, { roles: { program: ['plans'] } });
+    for (let i = 0; i < 3; i++) write(path.join(root, `plans/0-done/p${i}/README.md`), 'x');
+    const j = JSON.parse(run(['check', 'archive', '--root', root, '--json']).out);
+    assert.equal(j.legacy_count, undefined);
+    assert.equal(j.done_without_closeout.length, 3);
+  } finally { rm(root); }
+});
+
+test('T-K1-01 --summary: counts per kind, done_unclosed in full, other lists capped at 10 with "+N more"; JSON keeps all', () => {
+  const root = tmp();
+  try {
+    config(root, { roles: { program: ['plans'] } });
+    for (let i = 0; i < 25; i++) write(path.join(root, `plans/0-done/b${String(i).padStart(2, '0')}/README.md`), 'x');
+    for (let i = 0; i < 12; i++) write(path.join(root, `plans/0-done/u${String(i).padStart(2, '0')}/status.json`), JSON.stringify({ closed: false }));
+    const r = run(['check', 'archive', '--root', root, '--summary']);
+    assert.equal(r.code, 1);
+    assert.match(r.out, /summary: done_unclosed=12 done_without_closeout=25 stale_active=0 unowned=0/);
+    assert.equal(r.out.split('\n').filter((l) => /plans\/0-done\/u\d+/.test(l)).length, 12);
+    assert.equal(r.out.split('\n').filter((l) => /plans\/0-done\/b\d+/.test(l)).length, 10);
+    assert.match(r.out, /\+15 more/);
+    const j = JSON.parse(run(['check', 'archive', '--root', root, '--summary', '--json']).out);
+    assert.equal(j.done_without_closeout.length, 25);
+  } finally { rm(root); }
+});
