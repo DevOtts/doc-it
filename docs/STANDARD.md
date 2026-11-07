@@ -66,7 +66,7 @@ The six tiers are canonical. Claim ledgers written against the CONTRACT spelling
 ```
 
 - `roles` maps a role (§1) to paths relative to the repo root. `archive` defaults to `<program path>/0-done`. A top-level folder that no role covers is reported as **unowned**.
-- `archive_since` (optional, `YYYY-MM-DD`, default unset): archive packages whose last commit (last file mtime outside git) predates it are not listed by `check archive`; they are counted in `legacy_count`. Use it so a long legacy archive does not bury the real findings.
+- `archive_since` (optional, `YYYY-MM-DD`, default unset): archive packages with no board and no `CLOSEOUT.md` whose last commit (last file mtime outside git) predates it are counted in `legacy_count` instead of `done_without_closeout`. An open board in the archive (`done_unclosed`) is always listed. Use it so a long legacy archive does not bury the real findings.
 - All checks exit 0 clean, 1 findings, 2 config or usage error. A missing config is exit 2 with "run doc-it init".
 
 ### Check semantics

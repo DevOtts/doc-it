@@ -60,7 +60,7 @@ Roles: ${ROLES.join(', ')}. Without flags, asks a short interview (plans/archive
 The plans role is "program". Archive defaults to <program path>/0-done when not given.`,
   archive: `doc-it check archive [--root <dir>] [--stale-hours N] [--summary] [--json]
 --summary: counts per finding kind, done_unclosed in full, at most 10 entries of every other list ("+N more"). JSON keeps all lists.
-Config field archive_since (YYYY-MM-DD, default unset): archive packages whose last commit (or newest file mtime outside git) predates it are not listed; they are counted in legacy_count.
+Config field archive_since (YYYY-MM-DD, default unset): archive packages with no board and no CLOSEOUT whose last commit (or newest file mtime outside git) predates it are counted in legacy_count instead of done_without_closeout. done_unclosed is never hidden.
 Read-only. Reports done_unclosed (archive package whose status.json has closed:false), done_without_closeout (no status.json and no CLOSEOUT.md), stale_active (active package whose board updated_at is older than --stale-hours while newer files exist) and unowned (top-level paths with no role).
 Exit 0 clean, 1 findings, 2 config missing ("run doc-it init") or usage error.`,
   closeout: `doc-it check closeout <file> [--root <dir>] [--json]
@@ -208,10 +208,12 @@ function checkArchive(root, cfg, staleHours) {
     for (const name of subdirs(a)) {
       const dir = path.join(a, name);
       const rel = path.relative(root, dir);
-      if (since !== null && lastTouchedMs(root, dir) < since) { legacy++; continue; }
       const board = readBoard(dir);
-      if (board) { if (board.__invalid || board.closed !== true) res.done_unclosed.push(rel); }
-      else if (!isFile(path.join(dir, 'CLOSEOUT.md'))) res.done_without_closeout.push(rel);
+      // An open board in the archive is always a finding: archive_since never hides done_unclosed.
+      if (board) { if (board.__invalid || board.closed !== true) res.done_unclosed.push(rel); continue; }
+      if (isFile(path.join(dir, 'CLOSEOUT.md'))) continue;
+      if (since !== null && lastTouchedMs(root, dir) < since) { legacy++; continue; }
+      res.done_without_closeout.push(rel);
     }
   }
   const archiveSet = new Set(archives);
@@ -270,10 +272,18 @@ function validLink(raw, bases) {
   let l = raw.trim().replace(/`/g, '');
   const md = l.match(/^\[[^\]]*\]\(([^)]+)\)$/);
   if (md) l = md[1].trim();
-  if (/^https?:\/\/[^\s/]+\.?\S*$/i.test(l)) return true;
+  // A URL needs a dotted host (https://x is not a backlog item).
+  if (/^https?:\/\//i.test(l)) return /^https?:\/\/[a-z0-9-]+(\.[a-z0-9-]+)+(:\d+)?(\/\S*)?$/i.test(l);
   l = l.split('#')[0];
   if (!l || /^[a-z][a-z0-9+.-]*:/i.test(l) || path.isAbsolute(l)) return false;
-  return bases.some((b) => { try { return fs.existsSync(path.resolve(b, l)); } catch { return false; } });
+  // A path must name an existing FILE inside one of the bases: not `.`, `..`, a bare directory, or an escape.
+  return bases.some((b) => {
+    try {
+      const f = path.resolve(b, l); const rel = path.relative(path.resolve(b), f);
+      if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return false;
+      return fs.statSync(f).isFile();
+    } catch { return false; }
+  });
 }
 function lintCloseout(text, bases = []) {
   const problems = []; let rows = 0;
