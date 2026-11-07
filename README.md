@@ -41,7 +41,8 @@ Or run the CLI directly: `node scripts/doc-it.mjs <command>` (Node 18+, no depen
 | `doc-it check closeout <file>` | lint a CLOSEOUT: shipped needs evidence, dropped a reason, carried a backlog link | 0 / 1 / 2 |
 | `doc-it check checkout <repo...>` | HEAD vs `origin/<default>`; behind names both shas (DS-6) | 0 / 1 / 2 |
 | `doc-it check expiry [--root R] [--json]` | durable docs with `verified:` older than `expiry_days` (default 60); report only (DS-4) | 0 / 1 / 2 |
-| `doc-it tiers --json` | the six source tiers | 0 |
+| `doc-it tiers --json` | the six source tiers with `aliases`, `fact_ok` and a top-level alias map | 0 |
+| `doc-it tiers resolve "<cell>"` | resolve a ledger Tier cell (`+`-joined, optional qualifier); unknown part exits 1 | 0 / 1 |
 | `doc-it template closeout` | prints the CLOSEOUT template | 0 |
 
 Exit 0 clean, 1 findings, 2 config or usage error (missing config: "run doc-it init"). Every command takes `--help`. Consumers call `doc-it template closeout`; they never copy the template.

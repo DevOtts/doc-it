@@ -12,13 +12,32 @@ const TEMPLATE_DIR = path.resolve(HERE, '..', 'templates');
 const ROLES = ['live', 'code', 'generated', 'durable', 'program', 'archive', 'rules', 'pointer'];
 // STANDARD §2: six tiers, one per evidence role.
 const TIERS = [
-  { id: 'live', format: 'live@<date>', role: 'live' },
-  { id: 'code', format: 'code@<repo>@<sha>:<path>:<line>', role: 'code' },
-  { id: 'generated', format: 'generated', role: 'generated' },
-  { id: 'durable', format: 'durable@<verified-date>', role: 'durable' },
-  { id: 'program', format: 'program', role: 'program' },
-  { id: 'pointer', format: 'pointer', role: 'pointer' },
+  { id: 'live', format: 'live@<date>', role: 'live', aliases: ['live@<date>', 'local'], fact_ok: true },
+  { id: 'code', format: 'code@<repo>@<sha>:<path>:<line>', role: 'code', aliases: ['code@<ref>', 'git'], fact_ok: true },
+  { id: 'generated', format: 'generated', role: 'generated', aliases: [], fact_ok: true },
+  { id: 'durable', format: 'durable@<verified-date>', role: 'durable', aliases: ['durable@<verified-date>', 'durable-doc'], fact_ok: true },
+  { id: 'program', format: 'program', role: 'program', aliases: ['program-doc'], fact_ok: false },
+  { id: 'pointer', format: 'pointer', role: 'pointer', aliases: ['transcript'], fact_ok: false },
 ];
+const ALIASES = Object.fromEntries(TIERS.flatMap((t) => [[t.id, t.id], ...t.aliases.map((a) => [a, t.id])]));
+// `base@anything` resolves when base is a canonical tier that takes a qualifier.
+function resolveTier(spelling) {
+  if (ALIASES[spelling]) return ALIASES[spelling];
+  const m = spelling.match(/^(live|code|durable)@\S+$/);
+  return m ? m[1] : null;
+}
+function resolveCell(cell) {
+  const bare = cell.replace(/\([^)]*\)/g, ' ').trim();
+  const parts = bare.split('+').map((x) => x.trim());
+  const res = []; const unknown = [];
+  for (const sp of parts) {
+    const id = sp ? resolveTier(sp) : null;
+    if (!id) { unknown.push(sp); continue; }
+    res.push({ spelling: sp, id, fact_ok: TIERS.find((t) => t.id === id).fact_ok });
+  }
+  return { parts: res, unknown };
+}
+
 const DEFAULTS = { expiry_days: 60, stale_hours: 72 };
 
 const HELP = {
@@ -48,7 +67,7 @@ Lints a CLOSEOUT.md table: one row per piece; shipped needs evidence, dropped ne
 For each repo: fetch origin (unless --no-fetch), compare HEAD with origin/<default>. Exit 1 when behind, naming the local and remote sha. Also reports uncommitted changes in the working tree.`,
   expiry: `doc-it check expiry [--root <dir>] [--today YYYY-MM-DD] [--expiry-days N] [--json]
 Report only; never rewrites. Scans markdown under the durable role for verified: older than expiry_days (default 60) and docs with no verified:. Exit 0 / 1 / 2.`,
-  tiers: `doc-it tiers [--json]   print the source tier enum (live, code, generated, durable, program, pointer).`,
+  tiers: `doc-it tiers [--json]   print the six source tiers with aliases and fact_ok.\ndoc-it tiers resolve "<cell>"   resolve a ledger Tier cell ('+'-joined parts, optional (qualifier)); exit 1 naming an unknown part.`,
   template: `doc-it template closeout   print the CLOSEOUT template.`,
 };
 
@@ -333,9 +352,16 @@ function cmdCheckExpiry(flags) {
 }
 
 // ---------- tiers / template ----------
-function cmdTiers(flags) {
-  if (flags.json) out(JSON.stringify({ tiers: TIERS.map((t) => t.id), details: TIERS }, null, 2));
-  else TIERS.forEach((t) => out(`${t.id}\t${t.format}`));
+function cmdTiers(flags, pos) {
+  if (pos[0] === 'resolve') {
+    if (pos[1] === undefined) throw new Usage('usage: doc-it tiers resolve "<tier cell>"');
+    const r = resolveCell(pos[1]);
+    if (r.unknown.length) { out(JSON.stringify({ parts: r.parts, unknown: r.unknown })); err(`unknown tier part: ${r.unknown.map((u) => `"${u}"`).join(', ')}`); return 1; }
+    out(JSON.stringify({ parts: r.parts }, null, 2));
+    return 0;
+  }
+  if (flags.json) out(JSON.stringify({ version: '0.1.0', tiers: TIERS.map((t) => t.id), details: TIERS, aliases: ALIASES }, null, 2));
+  else TIERS.forEach((t) => out(`${t.id}\t${t.format}${t.aliases.length ? `\t(aliases: ${t.aliases.join(', ')})` : ''}`));
   return 0;
 }
 function cmdTemplate(pos) {
@@ -353,7 +379,7 @@ async function main(argv) {
   if (cmd === 'help') return helpFor('main');
   switch (cmd) {
     case 'init': return flags.help ? helpFor('init') : cmdInit(flags);
-    case 'tiers': return flags.help ? helpFor('tiers') : cmdTiers(flags);
+    case 'tiers': return flags.help ? helpFor('tiers') : cmdTiers(flags, pos.slice(1));
     case 'template': return flags.help ? helpFor('template') : cmdTemplate(pos.slice(1));
     case 'check':
       if (!sub) { if (flags.help) return helpFor('main'); throw new Usage('usage: doc-it check <archive|closeout|checkout|expiry>'); }

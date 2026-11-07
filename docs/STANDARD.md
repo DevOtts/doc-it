@@ -21,6 +21,19 @@ A project maps each role to one or more paths. A path with no role is reported a
 
 Every factual claim an analysis makes carries the tier of its source, from the table above: `live@date` · `code@repo@sha:path:line` · `generated` · `durable@verified` · `program` · `pointer`. A claim backed only by `program` or `pointer` may not be stated as fact (L4).
 
+### Ledger spellings (aliases)
+
+The six tiers are canonical. Claim ledgers written against the CONTRACT spelling stay valid: each spelling below resolves to one tier. A ledger Tier cell may join tiers with `+` and add a parenthetical qualifier (`code + local`, `code (absence)`); every part must resolve, and an unknown part is refused. `doc-it tiers --json` and `doc-it tiers resolve "<cell>"` are the source; consumers keep no copy.
+
+| Tier | Accepted spellings | May be stated as fact |
+|---|---|---|
+| live | `live`, `live@<date>`, `local` | yes |
+| code | `code`, `code@...`, `git` | yes |
+| generated | `generated` | yes |
+| durable | `durable`, `durable@...`, `durable-doc` | yes |
+| program | `program`, `program-doc` | no |
+| pointer | `pointer`, `transcript` | no |
+
 ## 3. Rules
 
 | ID | Rule | From | In 0.1.0 |
