@@ -56,7 +56,7 @@ test('T-K1-03 carried link must be an existing relative path or an http(s) URL; 
     write(path.join(d, 'pkg/sibling.md'), '# s');
     const f = path.join(d, 'pkg/CLOSEOUT.md');
     const row = (name, link) => `| ${name} | carried | rest | ${link} |\n`;
-    for (const [name, link] of [['r-na', 'n/a'], ['r-tbd', 'TBD/x'], ['r-hash', '#'], ['r-missing', 'backlog/nope.md'], ['r-ftp', 'ftp://x/y']]) {
+    for (const [name, link] of [['r-na', 'n/a'], ['r-tbd', 'TBD/x'], ['r-hash', '#'], ['r-missing', 'backlog/nope.md'], ['r-ftp', 'ftp://x/y'], ['r-dot', '.'], ['r-dotdot', '..'], ['r-dir', 'backlog'], ['r-hostless', 'https://x'], ['r-escape', '../../etc/hosts']]) {
       write(f, head + row(name, link));
       const r = run(['check', 'closeout', f, '--root', d]);
       assert.equal(r.code, 1, `${link}: ${r.out}`);

@@ -114,3 +114,17 @@ test('T-K1-01 --summary: counts per kind, done_unclosed in full, other lists cap
     assert.equal(j.done_without_closeout.length, 25);
   } finally { rm(root); }
 });
+
+test('T-K1-01 archive_since never hides an open board: an OLD done_unclosed package is still listed (CP-01 N4)', () => {
+  const root = tmp();
+  try {
+    legacyFixture(root);
+    const old = new Date('2025-06-01T00:00:00Z');
+    const f = path.join(root, 'plans/0-done/old-unclosed/status.json');
+    write(f, JSON.stringify({ closed: false }));
+    fs.utimesSync(f, old, old); fs.utimesSync(path.dirname(f), old, old);
+    const j = JSON.parse(run(['check', 'archive', '--root', root, '--json']).out);
+    assert.deepEqual(j.done_unclosed.sort(), ['plans/0-done/old-unclosed', 'plans/0-done/recent-unclosed']);
+    assert.equal(j.legacy_count, 12);
+  } finally { rm(root); }
+});
