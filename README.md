@@ -46,6 +46,16 @@ Or run the CLI directly: `node scripts/doc-it.mjs <command>` (Node 18+, no depen
 
 Exit 0 clean, 1 findings, 2 config or usage error (missing config: "run doc-it init"). Every command takes `--help`. Consumers call `doc-it template closeout`; they never copy the template.
 
+## For consumers
+
+Find the CLI in this order, and invoke it as `node <path> <args>`:
+
+1. env `DOC_IT_CLI`: absolute path to `doc-it.mjs`.
+2. the newest installed copy: `~/.claude/plugins/cache/<any marketplace>/doc-it/<version>/scripts/doc-it.mjs` (HOME-relative).
+3. neither found: print exactly `[skip] doc-it not installed: <what was not checked>`. Never report that check as PASS and never fail because of it.
+
+Stable names: `check archive --json`, `check closeout <file>`, `check checkout`, `check expiry`, `tiers --json`, `template closeout`. Never copy doc-it's rules, tier list or template.
+
 ## Files
 
 - `docs/STANDARD.md`: the standard (v0.1). Project-neutral.
