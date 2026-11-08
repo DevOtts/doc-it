@@ -78,7 +78,7 @@ The six tiers are canonical. Claim ledgers written against the CONTRACT spelling
   - `repo@sha` must resolve. The repo is found as the `--root` repo (when `<repo>` is its folder name or its `origin` repo name), as a sibling folder `<root>/../<repo>` that is a repo's own top folder, or through `--repos <repo>=<path>` (comma-separated or repeated). An unknown repo, or a sha that is not a commit in that repo, fails the row even when the row also cites something valid: a false citation is worse than none.
   - `#n` and `owner/repo#n` must be a positive number with no leading zero and at most 6 digits; `#0` is refused.
   - **Documented limit:** doc-it is offline, so `#n`, `owner/repo#n` and URLs are checked for format only. A well-formed `#999999` or `nobody/nothing#1` passes; a reviewer who needs more opens the link.
-  - A `dropped` reason needs at least 3 words of 2+ letters; `.`, `no` or a placeholder is refused.
+  - A `dropped` reason needs at least 3 distinct words of 2+ letters; `.`, `no`, `no no no` or a placeholder is refused.
   - Not yet checked: that the rows cover every piece the program lists.
 - **Checkout (DS-6).** `origin` is fetched, then HEAD is compared with `origin/<default>`; behind is exit 1 naming both shas. Uncommitted working-tree changes are reported, not failed.
 - **Expiry (DS-4).** Markdown under the durable role with `verified: YYYY-MM-DD` older than `expiry_days` is reported, as is any doc with no `verified:`. Never rewrites.

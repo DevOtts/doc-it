@@ -69,7 +69,7 @@ Lints a CLOSEOUT.md table: one row per piece; shipped needs evidence, dropped ne
 shipped evidence must cite at least one checkable thing: a PR or issue reference (#12, owner/repo#12), an http(s) URL with a dotted host, repo@sha (7-40 hex) that resolves, an existing file path, or a bare commit sha (7-40 hex) that exists in the --root repo (outside a git repo: 7-40 hex with a digit). "yes", "done", "merged" alone are refused.
 repo@sha resolves in: the --root repo when <repo> is its folder or origin name, a sibling folder <root>/../<repo> that is a repo, or --repos <repo>=<path>. An unknown repo or a sha that is not a commit there fails the row, even next to other evidence.
 #n must be a positive number, no leading zero, at most 6 digits (#0 is refused). doc-it is offline: #n and URLs are format-checked only.
-dropped reason must have at least 3 words of 2+ letters ("." or "no" are refused).`,
+dropped reason must have at least 3 distinct words of 2+ letters ("." or "no no no" are refused).`,
   checkout: `doc-it check checkout <repo...> [--no-fetch] [--json]
 For each repo: fetch origin (unless --no-fetch), compare HEAD with origin/<default>. Exit 1 when behind, naming the local and remote sha. Also reports uncommitted changes in the working tree.`,
   expiry: `doc-it check expiry [--root <dir>] [--today YYYY-MM-DD] [--expiry-days N] [--json]
@@ -327,7 +327,7 @@ function validLink(raw, bases) {
 //     commit there. An unknown repo or a missing sha is refused, naming the row.
 //   - `#n` / `owner/repo#n` must be a positive number with no leading zero and at most 6 digits (`#0` is refused).
 //     doc-it is offline, so `#n` is format-only (STANDARD section 5, documented limit).
-// A reason counts when it has at least 3 words of 2+ letters and is not a placeholder.
+// A reason counts when it has at least 3 DISTINCT words of 2+ letters and is not a placeholder (R2-L4).
 const HEX = /^[0-9a-f]{7,40}$/i;
 const MAX_REF_DIGITS = 6;
 function gitOk(cwd, ...args) {
@@ -404,7 +404,8 @@ function evidenceCites(detail, bases, gitRoot, ctx) {
 }
 function reasonSays(detail) {
   if (blank(detail)) return false;
-  return detail.split(/\s+/).filter((w) => (w.match(/\p{L}/gu) || []).length >= 2).length >= 3;
+  const words = detail.split(/\s+/).filter((w) => (w.match(/\p{L}/gu) || []).length >= 2).map((w) => w.toLowerCase().replace(/[^\p{L}\p{N}]/gu, ''));
+  return new Set(words).size >= 3;
 }
 function lintCloseout(text, bases = [], gitRoot = null, ctx = { root: process.cwd(), gitTop: null, repos: new Map() }) {
   const problems = []; let rows = 0;
@@ -434,7 +435,7 @@ function lintCloseout(text, bases = [], gitRoot = null, ctx = { root: process.cw
       }
     } else if (disp === 'dropped') {
       if (blank(detail)) problems.push(`row "${piece}": dropped needs a reason`);
-      else if (!reasonSays(detail)) problems.push(`row "${piece}": dropped needs a reason of at least 3 words; got "${detail}"`);
+      else if (!reasonSays(detail)) problems.push(`row "${piece}": dropped needs a reason of at least 3 distinct words; got "${detail}"`);
     }
     else if (disp === 'carried') {
       if (blank(link) || !validLink(link, bases)) problems.push(`row "${piece}": carried needs a backlog link (an existing relative path or an http(s) URL; got "${link}")`);

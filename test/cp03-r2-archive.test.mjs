@@ -60,3 +60,15 @@ test('R2-A1-M4 "#0", "#01" and an absurd "#1234567" are refused; "#999999" and "
   } finally { rm(d); }
 });
 
+test('R2-L4 a dropped reason needs 3 distinct words: "no no no", "it is it", "xx yy xx" are refused', () => {
+  const d = tmp();
+  try {
+    for (const weak of ['no no no', 'it is it', 'xx yy xx', 'Done done DONE']) {
+      const r = lint(d, [['Core', 'dropped', weak]]);
+      assert.equal(r.code, 1, `"${weak}" must be refused: ${r.out}`);
+      assert.match(r.out, /row "Core": dropped needs a reason of at least 3 distinct words/);
+    }
+    assert.equal(lint(d, [['Core', 'dropped', 'superseded by alpha']]).code, 0);
+  } finally { rm(d); }
+});
+

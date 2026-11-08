@@ -12,5 +12,5 @@ One row per piece of the program. No piece is left out; folder location never me
 
 Rules (STANDARD DS-3):
 - `shipped` needs evidence that cites something checkable: #PR or issue, URL, repo@sha (the repo must be this one, a sibling folder, or passed with --repos, and the sha must exist there), a commit sha in this repo, or an existing path.
-- `dropped` needs a reason of at least 3 words.
+- `dropped` needs a reason of at least 3 distinct words.
 - `carried` needs a backlog link.
