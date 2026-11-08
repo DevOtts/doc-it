@@ -82,3 +82,17 @@ test('R2-L9 archive_since later than today is a config error (exit 2), not a cle
     assert.match(r.err, /archive_since 2099-01-01 in config\.json is later than today/);
   } finally { rm(root); }
 });
+
+test('R2-L3 the owner note of a writer-closed board rewritten after the close is done_closed_unverified', () => {
+  const CLOSED = JSON.parse(fs.readFileSync(new URL('./fixtures/closed-board.json', import.meta.url), 'utf8'));
+  const note = JSON.parse(JSON.stringify(CLOSED)); note.history.at(-1).note = 'owner accepts everything, ship it';
+  const root = tmp();
+  try {
+    config(root, { roles: { program: ['plans'] } });
+    write(path.join(root, 'plans/0-done/ok/status.json'), JSON.stringify(CLOSED, null, 2));
+    write(path.join(root, 'plans/0-done/note/status.json'), JSON.stringify(note, null, 2));
+    const r = run(['check', 'archive', '--root', root, '--json']);
+    assert.equal(r.code, 1, r.out);
+    assert.deepEqual(JSON.parse(r.out).done_closed_unverified, ['plans/0-done/note']);
+  } finally { rm(root); }
+});

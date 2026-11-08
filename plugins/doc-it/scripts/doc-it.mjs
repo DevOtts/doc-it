@@ -210,7 +210,8 @@ function lastTouchedMs(root, dir) {
 // A closed board must be backed by the writer's freeze (CP-03 A1-H1): the last "*" history entry is a close by
 // conclude-it carrying board_sha256, and that digest still matches the board. The digest is the board writer's
 // (build-it status-write >= 4.2.0): sha256 of the board as canonical JSON (keys sorted at every depth), leaving out
-// updated_at, rechecks and every history entry from the close entry on. Returns the reason it is not backed, or null.
+// updated_at, rechecks and every history entry after the close entry; the close entry itself is covered without its
+// board_sha256 field (CP-03 R2-L3: its owner note cannot be rewritten). Returns the reason it is not backed, or null.
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const canonical = (v) => (Array.isArray(v) ? v.map(canonical) : isObj(v) ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canonical(v[k])])) : v);
 function unprovenClose(board) {
@@ -222,7 +223,8 @@ function unprovenClose(board) {
   if (e.by !== 'conclude-it') return `close entry by "${e.by}", not conclude-it`;
   if (typeof e.board_sha256 !== 'string') return 'close entry has no board_sha256 (not frozen by the board writer)';
   const { updated_at: _u, rechecks: _r, ...rest } = board;
-  rest.history = h.slice(0, ci);
+  const { board_sha256: _d, ...entry } = e;
+  rest.history = [...h.slice(0, ci), entry];
   if (crypto.createHash('sha256').update(JSON.stringify(canonical(rest))).digest('hex') !== e.board_sha256) return 'board changed after its close (board_sha256 mismatch)';
   return null;
 }
