@@ -11,6 +11,6 @@ One row per piece of the program. No piece is left out; folder location never me
 | <piece name> | carried | <what remains> | <path or URL of the backlog item> |
 
 Rules (STANDARD DS-3):
-- `shipped` needs evidence.
-- `dropped` needs a reason.
+- `shipped` needs evidence that cites something checkable: #PR or issue, URL, repo@sha, a commit sha in this repo, or an existing path.
+- `dropped` needs a reason of at least 3 words.
 - `carried` needs a backlog link.

@@ -54,3 +54,48 @@ test('A1-H1 a writer-closed board is clean, also with rechecks appended and upda
     assert.equal(r.code, 0, r.out);
   } finally { rm(root); }
 });
+
+const HEAD = '# CLOSEOUT: demo\n\n| Piece | Disposition | Evidence or reason | Backlog link |\n|---|---|---|---|\n';
+const lint = (dir, rows, root) => { const f = path.join(dir, 'CLOSEOUT.md'); write(f, HEAD + rows.map((r) => `| ${r.join(' | ')} | |`).join('\n') + '\n'); return run(['check', 'closeout', f, ...(root ? ['--root', root] : [])]); };
+
+test('A1-M2 shipped evidence "yes" and dropped reason "." are refused, naming the row', () => {
+  const d = tmp();
+  try {
+    const a = lint(d, [['Core', 'shipped', 'yes']]);
+    assert.equal(a.code, 1, a.out); assert.match(a.out, /"Core": shipped evidence must cite something checkable/);
+    const b = lint(d, [['Core', 'dropped', '.']]);
+    assert.equal(b.code, 1, b.out); assert.match(b.out, /"Core": dropped needs a reason/);
+    for (const weak of ['merged', 'done and shipped', 'abcdefg', 'see #', 'https://x']) {
+      const r = lint(d, [['Core', 'shipped', weak]]);
+      assert.equal(r.code, 1, `"${weak}" must be refused: ${r.out}`);
+    }
+    for (const weak of ['no', 'not needed', 'x y z']) {
+      const r = lint(d, [['Core', 'dropped', weak]]);
+      assert.equal(r.code, 1, `reason "${weak}" must be refused: ${r.out}`);
+    }
+  } finally { rm(d); }
+});
+
+test('A1-M2 checkable evidence passes: #PR, URL, repo@sha, existing path, a sha that resolves in --root', () => {
+  const d = tmp();
+  try {
+    write(path.join(d, 'deploy/record.md'), '# deployed');
+    for (const ok of ['PR #12 merged', 'owner/repo#7', 'https://github.com/o/r/pull/3', 'build-it@e25c255', 'deploy/record.md']) {
+      const r = lint(d, [['Core', 'shipped', ok]], d);
+      assert.equal(r.code, 0, `"${ok}" should pass: ${r.out}`);
+    }
+    assert.equal(lint(d, [['Core', 'dropped', 'superseded by the vendor API']]).code, 0);
+  } finally { rm(d); }
+});
+
+test('A1-M2 inside a git repo a bare sha must exist as a commit there', async () => {
+  const { git } = await import('./helpers.mjs');
+  const d = tmp();
+  try {
+    git(d, 'init', '-q'); write(path.join(d, 'a.txt'), 'a'); git(d, 'add', '-A'); git(d, 'commit', '-q', '-m', 'a');
+    const sha = git(d, 'rev-parse', 'HEAD');
+    assert.equal(lint(d, [['Core', 'shipped', `sha ${sha.slice(0, 9)} on main`]], d).code, 0);
+    const fake = lint(d, [['Core', 'shipped', 'sha 1234567 on main']], d);
+    assert.equal(fake.code, 1, fake.out); assert.match(fake.out, /must cite something checkable/);
+  } finally { rm(d); }
+});

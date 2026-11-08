@@ -65,7 +65,9 @@ Config field archive_since (YYYY-MM-DD, default unset): archive packages with no
 Read-only. Reports done_unclosed (archive package whose status.json has closed:false), done_closed_unverified (closed:true that the board writer's freeze does not back: no close history entry by conclude-it, no board_sha256, or a board changed after the close), done_without_closeout (no status.json and no CLOSEOUT.md), stale_active (active package whose board updated_at is older than --stale-hours while newer files exist) and unowned (top-level paths with no role).
 Exit 0 clean, 1 findings, 2 config missing ("run doc-it init") or usage error.`,
   closeout: `doc-it check closeout <file> [--root <dir>] [--json]
-Lints a CLOSEOUT.md table: one row per piece; shipped needs evidence, dropped needs a reason, carried needs a backlog link: an existing relative path (from the CLOSEOUT's folder or the repo root) or an http(s) URL. Failure names the row. Exit 0 / 1 / 2.`,
+Lints a CLOSEOUT.md table: one row per piece; shipped needs evidence, dropped needs a reason, carried needs a backlog link: an existing relative path (from the CLOSEOUT's folder or the repo root) or an http(s) URL. Failure names the row. Exit 0 / 1 / 2.
+shipped evidence must cite at least one checkable thing: a PR or issue reference (#12, owner/repo#12), an http(s) URL with a dotted host, repo@sha (7-40 hex), an existing file path, or a bare commit sha (7-40 hex) that exists in the --root repo (outside a git repo: 7-40 hex with a digit). "yes", "done", "merged" alone are refused.
+dropped reason must have at least 3 words of 2+ letters ("." or "no" are refused).`,
   checkout: `doc-it check checkout <repo...> [--no-fetch] [--json]
 For each repo: fetch origin (unless --no-fetch), compare HEAD with origin/<default>. Exit 1 when behind, naming the local and remote sha. Also reports uncommitted changes in the working tree.`,
   expiry: `doc-it check expiry [--root <dir>] [--today YYYY-MM-DD] [--expiry-days N] [--json]
@@ -311,7 +313,34 @@ function validLink(raw, bases) {
     } catch { return false; }
   });
 }
-function lintCloseout(text, bases = []) {
+// CP-03 A1-M2: `shipped` evidence must cite something a reader can check, and a `dropped` reason must say why.
+// Evidence counts when it contains at least one of: a PR or issue reference (`#12`, `owner/repo#12`), an http(s) URL
+// with a dotted host, `repo@sha` (7-40 hex), an existing file path (same bases as backlog links), or a bare commit sha
+// (7-40 hex) that resolves to a commit in the repo under --root (outside a git repo: 7-40 hex with at least one digit).
+// A reason counts when it has at least 3 words of 2+ letters and is not a placeholder.
+const HEX = /^[0-9a-f]{7,40}$/i;
+function commitResolves(gitRoot, sha) {
+  if (!gitRoot) return /\d/.test(sha);
+  try { execFileSync('git', ['cat-file', '-e', `${sha}^{commit}`], { cwd: gitRoot, stdio: 'ignore' }); return true; } catch { return false; }
+}
+function evidenceCites(detail, bases, gitRoot) {
+  const t = detail.replace(/`/g, ' ');
+  if (/(^|[\s(\[,;:])([\w.-]+\/[\w.-]+)?#\d+\b/.test(t)) return true;
+  const tokens = t.split(/\s+/).map((x) => x.replace(/^[(\[<"']+|[)\]>"'.,;:!?]+$/g, '')).filter(Boolean);
+  for (let tok of tokens) {
+    const md = tok.match(/^\[[^\]]*\]\(([^)]+)\)$/); if (md) tok = md[1];
+    if (/^https?:\/\//i.test(tok)) { if (/^https?:\/\/[a-z0-9-]+(\.[a-z0-9-]+)+(:\d+)?(\/\S*)?$/i.test(tok)) return true; continue; }
+    const at = tok.match(/^[\w./-]+@([0-9a-f]{7,40})$/i); if (at) return true;
+    if (HEX.test(tok)) { if (commitResolves(gitRoot, tok)) return true; continue; }
+    if (/[/.]/.test(tok) && validLink(tok, bases)) return true;
+  }
+  return false;
+}
+function reasonSays(detail) {
+  if (blank(detail)) return false;
+  return detail.split(/\s+/).filter((w) => (w.match(/\p{L}/gu) || []).length >= 2).length >= 3;
+}
+function lintCloseout(text, bases = [], gitRoot = null) {
   const problems = []; let rows = 0;
   const lines = text.replace(/<!--[\s\S]*?-->/g, '').split('\n');
   let cols = null;
@@ -330,8 +359,13 @@ function lintCloseout(text, bases = []) {
     const link = cols.link >= 0 ? (cells[cols.link] || '') : '';
     if (blank(piece) && !cells[0]) { continue; }
     rows++;
-    if (disp === 'shipped') { if (blank(detail)) problems.push(`row "${piece}": shipped needs evidence`); }
-    else if (disp === 'dropped') { if (blank(detail)) problems.push(`row "${piece}": dropped needs a reason`); }
+    if (disp === 'shipped') {
+      if (blank(detail)) problems.push(`row "${piece}": shipped needs evidence`);
+      else if (!evidenceCites(detail, bases, gitRoot)) problems.push(`row "${piece}": shipped evidence must cite something checkable (a #PR or issue, an http(s) URL, repo@sha, a commit sha that exists in this repo, or an existing path); got "${detail}"`);
+    } else if (disp === 'dropped') {
+      if (blank(detail)) problems.push(`row "${piece}": dropped needs a reason`);
+      else if (!reasonSays(detail)) problems.push(`row "${piece}": dropped needs a reason of at least 3 words; got "${detail}"`);
+    }
     else if (disp === 'carried') {
       if (blank(link) || !validLink(link, bases)) problems.push(`row "${piece}": carried needs a backlog link (an existing relative path or an http(s) URL; got "${link}")`);
     } else problems.push(`row "${piece}": disposition must be shipped, dropped or carried (got "${cells[cols.disp] || ''}")`);
@@ -346,8 +380,11 @@ function cmdCheckCloseout(flags, pos) {
   if (!pos[0]) throw new Usage('usage: doc-it check closeout <file>');
   if (!isFile(pos[0])) throw new Usage(`not a file: ${pos[0]}`);
   const file = path.resolve(pos[0]);
-  const bases = [path.dirname(file), path.resolve(flags.root || repoRoot(path.dirname(file)))];
-  const r = lintCloseout(fs.readFileSync(file, 'utf8'), bases);
+  const root = path.resolve(flags.root || repoRoot(path.dirname(file)));
+  const bases = [path.dirname(file), root];
+  let gitRoot = null;
+  try { execFileSync('git', ['rev-parse', '--verify', '-q', 'HEAD'], { cwd: root, stdio: 'ignore' }); gitRoot = root; } catch { /* not a git repo, or no commits */ }
+  const r = lintCloseout(fs.readFileSync(file, 'utf8'), bases, gitRoot);
   if (flags.json) out(JSON.stringify(r, null, 2));
   else if (r.problems.length) r.problems.forEach((p) => out(`FAIL ${p}`));
   else out(`ok: ${r.rows} piece(s)`);

@@ -10,7 +10,7 @@ test('T-K1-03 carried row without a backlog link fails naming the row; complete 
   try {
     const bad = path.join(d, 'bad.md'); const good = path.join(d, 'good.md');
     write(bad, head + '| alpha | shipped | PR #4 merged | |\n| beta-piece | carried | rest of it | |\n');
-    write(good, head + '| alpha | shipped | PR #4 merged | |\n| beta-piece | carried | rest of it | docs/backlog/beta.md |\n| gamma | dropped | superseded | |\n');
+    write(good, head + '| alpha | shipped | PR #4 merged | |\n| beta-piece | carried | rest of it | docs/backlog/beta.md |\n| gamma | dropped | superseded by alpha | |\n');
     write(path.join(d, 'docs/backlog/beta.md'), '# beta');
     const r1 = run(['check', 'closeout', bad]);
     assert.equal(r1.code, 1);
