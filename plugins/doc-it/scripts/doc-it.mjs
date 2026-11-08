@@ -61,7 +61,7 @@ Roles: ${ROLES.join(', ')}. Without flags, asks a short interview (plans/archive
 The plans role is "program". Archive defaults to <program path>/0-done when not given.`,
   archive: `doc-it check archive [--root <dir>] [--stale-hours N] [--summary] [--json]
 --summary: counts per finding kind, done_unclosed and done_closed_unverified in full, at most 10 entries of every other list ("+N more"). JSON keeps all lists.
-Config field archive_since (YYYY-MM-DD, default unset): archive packages with no board and no CLOSEOUT whose last commit (or newest file mtime outside git) predates it are counted in legacy_count instead of done_without_closeout. done_unclosed and done_closed_unverified are never hidden.
+Config field archive_since (YYYY-MM-DD, default unset): archive packages with no board and no CLOSEOUT whose last commit (or newest file mtime outside git) predates it are counted in legacy_count instead of done_without_closeout; a date later than today is a config error (exit 2). done_unclosed and done_closed_unverified are never hidden.
 Read-only. Reports done_unclosed (archive package whose status.json has closed:false), done_closed_unverified (closed:true that the board writer's freeze does not back: no close history entry by conclude-it, no board_sha256, or a board changed after the close), done_without_closeout (no status.json and no CLOSEOUT.md), stale_active (active package whose board updated_at is older than --stale-hours while newer files exist) and unowned (top-level paths with no role).
 Exit 0 clean, 1 findings, 2 config missing ("run doc-it init") or usage error.`,
   closeout: `doc-it check closeout <file> [--root <dir>] [--repos name=path[,name=path]] [--json]
@@ -116,6 +116,8 @@ function loadConfig(root) {
     if (!Array.isArray(v) || v.some((x) => typeof x !== 'string')) throw new Usage(`role "${r}" must be an array of paths`);
   }
   if (cfg.archive_since !== undefined && cfg.archive_since !== null && (typeof cfg.archive_since !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(cfg.archive_since) || Number.isNaN(Date.parse(cfg.archive_since + 'T00:00:00Z')))) throw new Usage('archive_since in config.json must be YYYY-MM-DD');
+  // CP-03 R2-L9: a date in the future would move every boardless archive package into legacy_count.
+  if (cfg.archive_since && Date.parse(cfg.archive_since + 'T00:00:00Z') > Date.now()) throw new Usage(`archive_since ${cfg.archive_since} in config.json is later than today; it would hide every archive package without a board or CLOSEOUT`);
   return { expiry_days: DEFAULTS.expiry_days, stale_hours: DEFAULTS.stale_hours, ...cfg };
 }
 const rolePaths = (cfg, role) => (cfg.roles[role] || []);

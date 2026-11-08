@@ -72,3 +72,13 @@ test('R2-L4 a dropped reason needs 3 distinct words: "no no no", "it is it", "xx
   } finally { rm(d); }
 });
 
+test('R2-L9 archive_since later than today is a config error (exit 2), not a clean archive', () => {
+  const root = tmp();
+  try {
+    config(root, { roles: { program: ['plans'] }, archive_since: '2099-01-01' });
+    write(path.join(root, 'plans/0-done/old/PLAN.md'), '# old\n');
+    const r = run(['check', 'archive', '--root', root]);
+    assert.equal(r.code, 2, r.out + r.err);
+    assert.match(r.err, /archive_since 2099-01-01 in config\.json is later than today/);
+  } finally { rm(root); }
+});
