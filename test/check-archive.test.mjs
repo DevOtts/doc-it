@@ -11,7 +11,8 @@ test('T-K1-01 check archive lists done_unclosed and done_without_closeout, omits
     write(path.join(root, 'plans/0-done/x/status.json'), JSON.stringify({ closed: false, updated_at: '2026-01-01T00:00:00Z' }));
     write(path.join(root, 'plans/0-done/y/README.md'), 'no board');
     write(path.join(root, 'plans/0-done/clean/CLOSEOUT.md'), '# c');
-    write(path.join(root, 'plans/0-done/closed/status.json'), JSON.stringify({ closed: true }));
+    // A board the writer closed (real fixture from status-write close; CP-03 A1-H1: a bare {closed:true} no longer counts).
+    write(path.join(root, 'plans/0-done/closed/status.json'), fs.readFileSync(new URL('./fixtures/closed-board.json', import.meta.url)));
     const r = run(['check', 'archive', '--root', root, '--json']);
     assert.equal(r.code, 1, r.err);
     const j = JSON.parse(r.out);

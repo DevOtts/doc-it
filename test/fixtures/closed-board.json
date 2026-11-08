@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "implementation": "closed",
+  "title": "Closed",
+  "updated_at": "2026-11-08T14:57:48Z",
+  "approximate": false,
+  "closed": true,
+  "waves": [
+    {
+      "id": "W1",
+      "title": "W",
+      "tasks": [
+        {
+          "id": "T-1",
+          "title": "one",
+          "status": "not-started",
+          "blocked_on": null,
+          "evidence": null,
+          "owner": null,
+          "updated_at": "2026-11-08T14:57:48Z",
+          "note": null
+        }
+      ]
+    }
+  ],
+  "sessions": [],
+  "pieces": [],
+  "history": [
+    {
+      "at": "2026-11-08T14:57:48Z",
+      "task": "T-1",
+      "from": "not-started",
+      "to": "not-started",
+      "by": "plan-it",
+      "note": "created"
+    },
+    {
+      "at": "2026-11-08T14:57:48Z",
+      "task": "*",
+      "from": "open",
+      "to": "closed",
+      "by": "conclude-it",
+      "note": "owner: T-1 dropped, program superseded",
+      "board_sha256": "69b75efca2886b441fcb69ea104dd0e943fb8914d683a573de0de8d662bc9f2a"
+    }
+  ]
+}

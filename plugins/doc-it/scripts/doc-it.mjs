@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -59,9 +60,9 @@ Every command accepts --help. Exit: 0 clean, 1 findings, 2 config or usage error
 Roles: ${ROLES.join(', ')}. Without flags, asks a short interview (plans/archive/durable first). With --yes or any role flag, runs non-interactively.
 The plans role is "program". Archive defaults to <program path>/0-done when not given.`,
   archive: `doc-it check archive [--root <dir>] [--stale-hours N] [--summary] [--json]
---summary: counts per finding kind, done_unclosed in full, at most 10 entries of every other list ("+N more"). JSON keeps all lists.
-Config field archive_since (YYYY-MM-DD, default unset): archive packages with no board and no CLOSEOUT whose last commit (or newest file mtime outside git) predates it are counted in legacy_count instead of done_without_closeout. done_unclosed is never hidden.
-Read-only. Reports done_unclosed (archive package whose status.json has closed:false), done_without_closeout (no status.json and no CLOSEOUT.md), stale_active (active package whose board updated_at is older than --stale-hours while newer files exist) and unowned (top-level paths with no role).
+--summary: counts per finding kind, done_unclosed and done_closed_unverified in full, at most 10 entries of every other list ("+N more"). JSON keeps all lists.
+Config field archive_since (YYYY-MM-DD, default unset): archive packages with no board and no CLOSEOUT whose last commit (or newest file mtime outside git) predates it are counted in legacy_count instead of done_without_closeout. done_unclosed and done_closed_unverified are never hidden.
+Read-only. Reports done_unclosed (archive package whose status.json has closed:false), done_closed_unverified (closed:true that the board writer's freeze does not back: no close history entry by conclude-it, no board_sha256, or a board changed after the close), done_without_closeout (no status.json and no CLOSEOUT.md), stale_active (active package whose board updated_at is older than --stale-hours while newer files exist) and unowned (top-level paths with no role).
 Exit 0 clean, 1 findings, 2 config missing ("run doc-it init") or usage error.`,
   closeout: `doc-it check closeout <file> [--root <dir>] [--json]
 Lints a CLOSEOUT.md table: one row per piece; shipped needs evidence, dropped needs a reason, carried needs a backlog link: an existing relative path (from the CLOSEOUT's folder or the repo root) or an http(s) URL. Failure names the row. Exit 0 / 1 / 2.`,
@@ -199,8 +200,28 @@ function lastTouchedMs(root, dir) {
   return newestMtime(dir, null);
 }
 
+// A closed board must be backed by the writer's freeze (CP-03 A1-H1): the last "*" history entry is a close by
+// conclude-it carrying board_sha256, and that digest still matches the board. The digest is the board writer's
+// (build-it status-write >= 4.2.0): sha256 of the board as canonical JSON (keys sorted at every depth), leaving out
+// updated_at, rechecks and every history entry from the close entry on. Returns the reason it is not backed, or null.
+const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const canonical = (v) => (Array.isArray(v) ? v.map(canonical) : isObj(v) ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canonical(v[k])])) : v);
+function unprovenClose(board) {
+  const h = Array.isArray(board.history) ? board.history : [];
+  let ci = -1;
+  for (let i = h.length - 1; i >= 0; i--) if (isObj(h[i]) && h[i].task === '*') { ci = h[i].to === 'closed' ? i : -2; break; }
+  if (ci < 0) return 'closed:true but no close history entry backs it';
+  const e = h[ci];
+  if (e.by !== 'conclude-it') return `close entry by "${e.by}", not conclude-it`;
+  if (typeof e.board_sha256 !== 'string') return 'close entry has no board_sha256 (not frozen by the board writer)';
+  const { updated_at: _u, rechecks: _r, ...rest } = board;
+  rest.history = h.slice(0, ci);
+  if (crypto.createHash('sha256').update(JSON.stringify(canonical(rest))).digest('hex') !== e.board_sha256) return 'board changed after its close (board_sha256 mismatch)';
+  return null;
+}
+
 function checkArchive(root, cfg, staleHours) {
-  const res = { done_unclosed: [], done_without_closeout: [], stale_active: [], unowned: [] };
+  const res = { done_unclosed: [], done_without_closeout: [], stale_active: [], unowned: [], done_closed_unverified: [] };
   const since = cfg.archive_since ? Date.parse(cfg.archive_since + 'T00:00:00Z') : null;
   let legacy = 0;
   const archives = archivePaths(cfg).map((p) => abs(root, p));
@@ -210,7 +231,11 @@ function checkArchive(root, cfg, staleHours) {
       const rel = path.relative(root, dir);
       const board = readBoard(dir);
       // An open board in the archive is always a finding: archive_since never hides done_unclosed.
-      if (board) { if (board.__invalid || board.closed !== true) res.done_unclosed.push(rel); continue; }
+      if (board) {
+        if (board.__invalid || board.closed !== true) res.done_unclosed.push(rel);
+        else if (unprovenClose(board)) res.done_closed_unverified.push(rel);
+        continue;
+      }
       if (isFile(path.join(dir, 'CLOSEOUT.md'))) continue;
       if (since !== null && lastTouchedMs(root, dir) < since) { legacy++; continue; }
       res.done_without_closeout.push(rel);
@@ -246,7 +271,7 @@ function cmdCheckArchive(flags) {
   const n = Object.values(res).reduce((s, a) => s + (Array.isArray(a) ? a.length : 0), 0);
   if (flags.json) out(JSON.stringify(res, null, 2));
   else {
-    const cap = (k) => (flags.summary && k !== 'done_unclosed' ? 10 : Infinity);
+    const cap = (k) => (flags.summary && k !== 'done_unclosed' && k !== 'done_closed_unverified' ? 10 : Infinity);
     const sect = (k, title) => {
       if (!res[k].length) return;
       out(`${title} (${res[k].length}):`);
@@ -256,6 +281,7 @@ function cmdCheckArchive(flags) {
     if (flags.summary) out(`summary: ${Object.keys(res).filter((k) => Array.isArray(res[k])).map((k) => `${k}=${res[k].length}`).join(' ')}${res.legacy_count !== undefined ? ` legacy_count=${res.legacy_count}` : ''}`);
     else if (res.legacy_count) out(`legacy_count=${res.legacy_count} (before archive_since ${cfg.archive_since})`);
     sect('done_unclosed', 'archived but board not closed');
+    sect('done_closed_unverified', 'archived, board says closed but no writer freeze backs it (set by hand or edited after close)');
     sect('done_without_closeout', 'archived with no board and no CLOSEOUT.md');
     sect('stale_active', 'active board older than stale limit while newer files exist');
     sect('unowned', 'paths with no role (unowned)');
