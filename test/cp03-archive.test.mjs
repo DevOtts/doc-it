@@ -76,14 +76,22 @@ test('A1-M2 shipped evidence "yes" and dropped reason "." are refused, naming th
   } finally { rm(d); }
 });
 
-test('A1-M2 checkable evidence passes: #PR, URL, repo@sha, existing path, a sha that resolves in --root', () => {
+test('A1-M2 checkable evidence passes: #PR, URL, repo@sha, existing path, a sha that resolves in --root', async () => {
+  const { git } = await import('./helpers.mjs');
   const d = tmp();
   try {
     write(path.join(d, 'deploy/record.md'), '# deployed');
-    for (const ok of ['PR #12 merged', 'owner/repo#7', 'https://github.com/o/r/pull/3', 'build-it@e25c255', 'deploy/record.md']) {
-      const r = lint(d, [['Core', 'shipped', ok]], d);
+    // R2-A1-M4: repo@sha must resolve, so the sibling repo build-it exists next to --root with that commit.
+    const sib = tmp(); const bi = path.join(sib, 'build-it'); const root = path.join(sib, 'proj');
+    fs.mkdirSync(bi); fs.mkdirSync(root);
+    git(bi, 'init', '-q'); write(path.join(bi, 'a.txt'), 'a'); git(bi, 'add', '-A'); git(bi, 'commit', '-q', '-m', 'a');
+    const bsha = git(bi, 'rev-parse', '--short=7', 'HEAD');
+    write(path.join(root, 'deploy/record.md'), '# deployed');
+    for (const ok of ['PR #12 merged', 'owner/repo#7', 'https://github.com/o/r/pull/3', `build-it@${bsha}`, 'deploy/record.md']) {
+      const r = lint(root, [['Core', 'shipped', ok]], root);
       assert.equal(r.code, 0, `"${ok}" should pass: ${r.out}`);
     }
+    rm(sib);
     assert.equal(lint(d, [['Core', 'dropped', 'superseded by the vendor API']]).code, 0);
   } finally { rm(d); }
 });

@@ -64,9 +64,11 @@ The plans role is "program". Archive defaults to <program path>/0-done when not 
 Config field archive_since (YYYY-MM-DD, default unset): archive packages with no board and no CLOSEOUT whose last commit (or newest file mtime outside git) predates it are counted in legacy_count instead of done_without_closeout. done_unclosed and done_closed_unverified are never hidden.
 Read-only. Reports done_unclosed (archive package whose status.json has closed:false), done_closed_unverified (closed:true that the board writer's freeze does not back: no close history entry by conclude-it, no board_sha256, or a board changed after the close), done_without_closeout (no status.json and no CLOSEOUT.md), stale_active (active package whose board updated_at is older than --stale-hours while newer files exist) and unowned (top-level paths with no role).
 Exit 0 clean, 1 findings, 2 config missing ("run doc-it init") or usage error.`,
-  closeout: `doc-it check closeout <file> [--root <dir>] [--json]
+  closeout: `doc-it check closeout <file> [--root <dir>] [--repos name=path[,name=path]] [--json]
 Lints a CLOSEOUT.md table: one row per piece; shipped needs evidence, dropped needs a reason, carried needs a backlog link: an existing relative path (from the CLOSEOUT's folder or the repo root) or an http(s) URL. Failure names the row. Exit 0 / 1 / 2.
-shipped evidence must cite at least one checkable thing: a PR or issue reference (#12, owner/repo#12), an http(s) URL with a dotted host, repo@sha (7-40 hex), an existing file path, or a bare commit sha (7-40 hex) that exists in the --root repo (outside a git repo: 7-40 hex with a digit). "yes", "done", "merged" alone are refused.
+shipped evidence must cite at least one checkable thing: a PR or issue reference (#12, owner/repo#12), an http(s) URL with a dotted host, repo@sha (7-40 hex) that resolves, an existing file path, or a bare commit sha (7-40 hex) that exists in the --root repo (outside a git repo: 7-40 hex with a digit). "yes", "done", "merged" alone are refused.
+repo@sha resolves in: the --root repo when <repo> is its folder or origin name, a sibling folder <root>/../<repo> that is a repo, or --repos <repo>=<path>. An unknown repo or a sha that is not a commit there fails the row, even next to other evidence.
+#n must be a positive number, no leading zero, at most 6 digits (#0 is refused). doc-it is offline: #n and URLs are format-checked only.
 dropped reason must have at least 3 words of 2+ letters ("." or "no" are refused).`,
   checkout: `doc-it check checkout <repo...> [--no-fetch] [--json]
 For each repo: fetch origin (unless --no-fetch), compare HEAD with origin/<default>. Exit 1 when behind, naming the local and remote sha. Also reports uncommitted changes in the working tree.`,
@@ -84,11 +86,12 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a.startsWith('--')) {
       const eq = a.indexOf('=');
-      if (eq > 0) { flags[a.slice(2, eq)] = a.slice(eq + 1); continue; }
+      const put = (k, v) => { flags[k] = (k === 'repos' && typeof flags[k] === 'string' && typeof v === 'string') ? `${flags[k]},${v}` : v; };
+      if (eq > 0) { put(a.slice(2, eq), a.slice(eq + 1)); continue; }
       const k = a.slice(2);
       const next = argv[i + 1];
-      if (['json', 'yes', 'force', 'help', 'no-fetch', 'summary'].includes(k) || next === undefined || next.startsWith('--')) flags[k] = true;
-      else { flags[k] = next; i++; }
+      if (['json', 'yes', 'force', 'help', 'no-fetch', 'summary'].includes(k) || next === undefined || next.startsWith('--')) put(k, true);
+      else { put(k, next); i++; }
     } else pos.push(a);
   }
   return { flags, pos };
@@ -315,32 +318,95 @@ function validLink(raw, bases) {
 }
 // CP-03 A1-M2: `shipped` evidence must cite something a reader can check, and a `dropped` reason must say why.
 // Evidence counts when it contains at least one of: a PR or issue reference (`#12`, `owner/repo#12`), an http(s) URL
-// with a dotted host, `repo@sha` (7-40 hex), an existing file path (same bases as backlog links), or a bare commit sha
-// (7-40 hex) that resolves to a commit in the repo under --root (outside a git repo: 7-40 hex with at least one digit).
+// with a dotted host, `repo@sha` (7-40 hex) that resolves, an existing file path (same bases as backlog links), or a
+// bare commit sha (7-40 hex) that resolves to a commit in the repo under --root (outside a git repo: 7-40 hex with at
+// least one digit).
+// CP-03 R2-A1-M4: a citation that is present but false fails the row even when another citation passes:
+//   - `repo@sha` must resolve: the repo is the --root repo (name = its folder or its origin's repo name), a sibling
+//     folder `<root>/../<repo>` that is a repo of its own, or one named by `--repos name=path`; the sha must be a
+//     commit there. An unknown repo or a missing sha is refused, naming the row.
+//   - `#n` / `owner/repo#n` must be a positive number with no leading zero and at most 6 digits (`#0` is refused).
+//     doc-it is offline, so `#n` is format-only (STANDARD section 5, documented limit).
 // A reason counts when it has at least 3 words of 2+ letters and is not a placeholder.
 const HEX = /^[0-9a-f]{7,40}$/i;
+const MAX_REF_DIGITS = 6;
+function gitOk(cwd, ...args) {
+  try { execFileSync('git', args, { cwd, stdio: 'ignore' }); return true; } catch { return false; }
+}
+function gitOut(cwd, ...args) {
+  try { return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; }
+}
 function commitResolves(gitRoot, sha) {
   if (!gitRoot) return /\d/.test(sha);
-  try { execFileSync('git', ['cat-file', '-e', `${sha}^{commit}`], { cwd: gitRoot, stdio: 'ignore' }); return true; } catch { return false; }
+  return gitOk(gitRoot, 'cat-file', '-e', `${sha}^{commit}`);
 }
-function evidenceCites(detail, bases, gitRoot) {
+const real = (p) => { try { return fs.realpathSync.native(p); } catch { return null; } };
+// A folder counts as a repo only when it IS a repo's top level: `git -C` would otherwise walk up into an enclosing repo.
+function isRepoTop(dir) {
+  const r = real(dir); if (!r || !isDir(r)) return false;
+  const top = gitOut(r, 'rev-parse', '--show-toplevel');
+  return !!top && real(top) === r;
+}
+const repoKey = (name) => name.replace(/\.git$/i, '').split('/').filter(Boolean).pop()?.toLowerCase() || '';
+// --repos name=path[,name=path...] (repeatable). A bad entry is a usage error.
+function parseRepos(v) {
+  const m = new Map();
+  if (v === undefined) return m;
+  if (v === true) throw new Usage('--repos needs name=path');
+  for (const ent of String(v).split(',').map((x) => x.trim()).filter(Boolean)) {
+    const eq = ent.indexOf('=');
+    const name = eq > 0 ? ent.slice(0, eq).trim() : ''; const p = eq > 0 ? ent.slice(eq + 1).trim() : '';
+    if (!name || !p) throw new Usage(`--repos entry "${ent}" must be name=path`);
+    m.set(repoKey(name), path.resolve(p));
+  }
+  return m;
+}
+// Where `<name>@sha` lives: { dir } or { why } (why the repo could not be found).
+function resolveRepo(name, ctx) {
+  const key = repoKey(name);
+  const pinned = ctx.repos.get(key);
+  if (pinned) return isRepoTop(pinned) ? { dir: pinned } : { why: `--repos ${key}=${pinned} is not a git repository's top folder` };
+  const top = ctx.gitTop;
+  if (top) {
+    if (path.basename(top).toLowerCase() === key) return { dir: top };
+    const origin = gitOut(top, 'remote', 'get-url', 'origin');
+    if (origin && repoKey(origin.replace(/^.*[:/]([^:/]+\/[^:/]+)$/, '$1')) === key) return { dir: top };
+  }
+  const sib = path.join(path.dirname(top || ctx.root), key);
+  if (isRepoTop(sib)) return { dir: sib };
+  return { why: `no repo "${key}": not the --root repo (folder or origin name), no sibling folder ../${key}, not in --repos name=path` };
+}
+// Returns { cited, bad: [why...] }.
+function evidenceCites(detail, bases, gitRoot, ctx) {
   const t = detail.replace(/`/g, ' ');
-  if (/(^|[\s(\[,;:])([\w.-]+\/[\w.-]+)?#\d+\b/.test(t)) return true;
+  let cited = false; const bad = [];
+  for (const m of t.matchAll(/(^|[\s(\[,;:])((?:[\w.-]+\/[\w.-]+)?#(\d+))\b/g)) {
+    const n = m[3];
+    if (/^0/.test(n) || n.length > MAX_REF_DIGITS) bad.push(`${m[2]} is not a PR or issue number (positive, no leading zero, at most ${MAX_REF_DIGITS} digits)`);
+    else cited = true;
+  }
   const tokens = t.split(/\s+/).map((x) => x.replace(/^[(\[<"']+|[)\]>"'.,;:!?]+$/g, '')).filter(Boolean);
   for (let tok of tokens) {
     const md = tok.match(/^\[[^\]]*\]\(([^)]+)\)$/); if (md) tok = md[1];
-    if (/^https?:\/\//i.test(tok)) { if (/^https?:\/\/[a-z0-9-]+(\.[a-z0-9-]+)+(:\d+)?(\/\S*)?$/i.test(tok)) return true; continue; }
-    const at = tok.match(/^[\w./-]+@([0-9a-f]{7,40})$/i); if (at) return true;
-    if (HEX.test(tok)) { if (commitResolves(gitRoot, tok)) return true; continue; }
-    if (/[/.]/.test(tok) && validLink(tok, bases)) return true;
+    if (/^https?:\/\//i.test(tok)) { if (/^https?:\/\/[a-z0-9-]+(\.[a-z0-9-]+)+(:\d+)?(\/\S*)?$/i.test(tok)) cited = true; continue; }
+    const at = tok.match(/^([\w./-]+)@([0-9a-f]{7,40})$/i);
+    if (at) {
+      const repo = resolveRepo(at[1], ctx);
+      if (repo.why) bad.push(`${tok} does not resolve: ${repo.why}`);
+      else if (!gitOk(repo.dir, 'cat-file', '-e', `${at[2]}^{commit}`)) bad.push(`${tok} does not resolve: ${at[2]} is not a commit in ${repo.dir}`);
+      else cited = true;
+      continue;
+    }
+    if (HEX.test(tok)) { if (commitResolves(gitRoot, tok)) cited = true; continue; }
+    if (/[/.]/.test(tok) && validLink(tok, bases)) cited = true;
   }
-  return false;
+  return { cited, bad };
 }
 function reasonSays(detail) {
   if (blank(detail)) return false;
   return detail.split(/\s+/).filter((w) => (w.match(/\p{L}/gu) || []).length >= 2).length >= 3;
 }
-function lintCloseout(text, bases = [], gitRoot = null) {
+function lintCloseout(text, bases = [], gitRoot = null, ctx = { root: process.cwd(), gitTop: null, repos: new Map() }) {
   const problems = []; let rows = 0;
   const lines = text.replace(/<!--[\s\S]*?-->/g, '').split('\n');
   let cols = null;
@@ -361,7 +427,11 @@ function lintCloseout(text, bases = [], gitRoot = null) {
     rows++;
     if (disp === 'shipped') {
       if (blank(detail)) problems.push(`row "${piece}": shipped needs evidence`);
-      else if (!evidenceCites(detail, bases, gitRoot)) problems.push(`row "${piece}": shipped evidence must cite something checkable (a #PR or issue, an http(s) URL, repo@sha, a commit sha that exists in this repo, or an existing path); got "${detail}"`);
+      else {
+        const ev = evidenceCites(detail, bases, gitRoot, ctx);
+        if (ev.bad.length) for (const b of ev.bad) problems.push(`row "${piece}": shipped evidence ${b}; got "${detail}"`);
+        else if (!ev.cited) problems.push(`row "${piece}": shipped evidence must cite something checkable (a #PR or issue, an http(s) URL, repo@sha that resolves, a commit sha that exists in this repo, or an existing path); got "${detail}"`);
+      }
     } else if (disp === 'dropped') {
       if (blank(detail)) problems.push(`row "${piece}": dropped needs a reason`);
       else if (!reasonSays(detail)) problems.push(`row "${piece}": dropped needs a reason of at least 3 words; got "${detail}"`);
@@ -384,7 +454,9 @@ function cmdCheckCloseout(flags, pos) {
   const bases = [path.dirname(file), root];
   let gitRoot = null;
   try { execFileSync('git', ['rev-parse', '--verify', '-q', 'HEAD'], { cwd: root, stdio: 'ignore' }); gitRoot = root; } catch { /* not a git repo, or no commits */ }
-  const r = lintCloseout(fs.readFileSync(file, 'utf8'), bases, gitRoot);
+  const repos = parseRepos(flags.repos);
+  const gitTop = gitOut(root, 'rev-parse', '--show-toplevel');
+  const r = lintCloseout(fs.readFileSync(file, 'utf8'), bases, gitRoot, { root, gitTop: gitTop ? (real(gitTop) || gitTop) : null, repos });
   if (flags.json) out(JSON.stringify(r, null, 2));
   else if (r.problems.length) r.problems.forEach((p) => out(`FAIL ${p}`));
   else out(`ok: ${r.rows} piece(s)`);
