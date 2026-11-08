@@ -11,6 +11,7 @@
 - CP-03 R2-L4: a `dropped` reason needs 3 distinct words (`no no no`, `it is it` are refused).
 - CP-03 R2-L9: `archive_since` later than today is a config error (exit 2) instead of a clean archive.
 - CP-03 R2-L3: the `board_sha256` check covers the close entry (without its digest field), in step with build-it status-write, so a rewritten owner note is `done_closed_unverified`.
+- CP-03 R3-L1: a `shipped` URL needs a path after the host (`http://a.b` is refused; `https://a.b/x` still passes on format). `#n` stays format-only and the sha-is-not-shipping limit (R3-L2) is documented in STANDARD §5.
 - Consumers that find doc-it missing print `[skip] doc-it not installed: <what was not checked>` and never PASS that check (D14).
 
 ## 0.0.0 (design only)

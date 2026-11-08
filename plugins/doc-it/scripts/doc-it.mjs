@@ -66,9 +66,9 @@ Read-only. Reports done_unclosed (archive package whose status.json has closed:f
 Exit 0 clean, 1 findings, 2 config missing ("run doc-it init") or usage error.`,
   closeout: `doc-it check closeout <file> [--root <dir>] [--repos name=path[,name=path]] [--json]
 Lints a CLOSEOUT.md table: one row per piece; shipped needs evidence, dropped needs a reason, carried needs a backlog link: an existing relative path (from the CLOSEOUT's folder or the repo root) or an http(s) URL. Failure names the row. Exit 0 / 1 / 2.
-shipped evidence must cite at least one checkable thing: a PR or issue reference (#12, owner/repo#12), an http(s) URL with a dotted host, repo@sha (7-40 hex) that resolves, an existing file path, or a bare commit sha (7-40 hex) that exists in the --root repo (outside a git repo: 7-40 hex with a digit). "yes", "done", "merged" alone are refused.
+shipped evidence must cite at least one checkable thing: a PR or issue reference (#12, owner/repo#12), an http(s) URL with a dotted host and a path (https://host/x; a bare host is refused), repo@sha (7-40 hex) that resolves, an existing file path, or a bare commit sha (7-40 hex) that exists in the --root repo (outside a git repo: 7-40 hex with a digit). "yes", "done", "merged" alone are refused.
 repo@sha resolves in: the --root repo when <repo> is its folder or origin name, a sibling folder <root>/../<repo> that is a repo, or --repos <repo>=<path>. An unknown repo or a sha that is not a commit there fails the row, even next to other evidence.
-#n must be a positive number, no leading zero, at most 6 digits (#0 is refused). doc-it is offline: #n and URLs are format-checked only.
+#n must be a positive number, no leading zero, at most 6 digits (#0 is refused). doc-it is offline: #n and URLs are format-checked only, and a sha that resolves is not proof that it shipped (it is not checked to be on the default branch).
 dropped reason must have at least 3 distinct words of 2+ letters ("." or "no no no" are refused).`,
   checkout: `doc-it check checkout <repo...> [--no-fetch] [--json]
 For each repo: fetch origin (unless --no-fetch), compare HEAD with origin/<default>. Exit 1 when behind, naming the local and remote sha. Also reports uncommitted changes in the working tree.`,
@@ -322,7 +322,7 @@ function validLink(raw, bases) {
 }
 // CP-03 A1-M2: `shipped` evidence must cite something a reader can check, and a `dropped` reason must say why.
 // Evidence counts when it contains at least one of: a PR or issue reference (`#12`, `owner/repo#12`), an http(s) URL
-// with a dotted host, `repo@sha` (7-40 hex) that resolves, an existing file path (same bases as backlog links), or a
+// with a dotted host and a path (R3-L1), `repo@sha` (7-40 hex) that resolves, an existing file path (same bases as backlog links), or a
 // bare commit sha (7-40 hex) that resolves to a commit in the repo under --root (outside a git repo: 7-40 hex with at
 // least one digit).
 // CP-03 R2-A1-M4: a citation that is present but false fails the row even when another citation passes:
@@ -392,7 +392,8 @@ function evidenceCites(detail, bases, gitRoot, ctx) {
   const tokens = t.split(/\s+/).map((x) => x.replace(/^[(\[<"']+|[)\]>"'.,;:!?]+$/g, '')).filter(Boolean);
   for (let tok of tokens) {
     const md = tok.match(/^\[[^\]]*\]\(([^)]+)\)$/); if (md) tok = md[1];
-    if (/^https?:\/\//i.test(tok)) { if (/^https?:\/\/[a-z0-9-]+(\.[a-z0-9-]+)+(:\d+)?(\/\S*)?$/i.test(tok)) cited = true; continue; }
+    // CP-03 R3-L1: a URL counts only with a path after the host (`http://a.b` names no PR, commit or record).
+    if (/^https?:\/\//i.test(tok)) { if (/^https?:\/\/[a-z0-9-]+(\.[a-z0-9-]+)+(:\d+)?\/[^\s/?#]\S*$/i.test(tok)) cited = true; continue; }
     const at = tok.match(/^([\w./-]+)@([0-9a-f]{7,40})$/i);
     if (at) {
       const repo = resolveRepo(at[1], ctx);
@@ -435,7 +436,7 @@ function lintCloseout(text, bases = [], gitRoot = null, ctx = { root: process.cw
       else {
         const ev = evidenceCites(detail, bases, gitRoot, ctx);
         if (ev.bad.length) for (const b of ev.bad) problems.push(`row "${piece}": shipped evidence ${b}; got "${detail}"`);
-        else if (!ev.cited) problems.push(`row "${piece}": shipped evidence must cite something checkable (a #PR or issue, an http(s) URL, repo@sha that resolves, a commit sha that exists in this repo, or an existing path); got "${detail}"`);
+        else if (!ev.cited) problems.push(`row "${piece}": shipped evidence must cite something checkable (a #PR or issue, an http(s) URL with a path, repo@sha that resolves, a commit sha that exists in this repo, or an existing path); got "${detail}"`);
       }
     } else if (disp === 'dropped') {
       if (blank(detail)) problems.push(`row "${piece}": dropped needs a reason`);
