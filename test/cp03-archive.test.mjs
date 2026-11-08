@@ -48,11 +48,13 @@ test('A1-H1 a forged close entry without board_sha256, a close entry by another 
 test('A1-H1 a writer-closed board is clean, also with rechecks appended and updated_at bumped after the close', () => {
   const later = clone(); later.updated_at = '2026-11-09T00:00:00Z';
   later.rechecks = [{ at: '2026-11-09T00:00:00Z', task: 'T-1', sha: 'abcdef1', command_sha: 'x', result: 'pass' }];
-  const root = archiveWith({ ok: clone(), later });
+  // The fixture board's implementation is "closed", so it sits in a folder of that name (R4-A1-M7: a board belongs to
+  // the package it names).
+  const root = archiveWith({ closed: clone() });
+  const root2 = archiveWith({ closed: later });
   try {
-    const r = run(['check', 'archive', '--root', root, '--json']);
-    assert.equal(r.code, 0, r.out);
-  } finally { rm(root); }
+    for (const r of [run(['check', 'archive', '--root', root, '--json']), run(['check', 'archive', '--root', root2, '--json'])]) assert.equal(r.code, 0, r.out);
+  } finally { rm(root); rm(root2); }
 });
 
 const HEAD = '# CLOSEOUT: demo\n\n| Piece | Disposition | Evidence or reason | Backlog link |\n|---|---|---|---|\n';

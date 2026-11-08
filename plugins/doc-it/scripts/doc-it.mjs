@@ -60,9 +60,9 @@ Every command accepts --help. Exit: 0 clean, 1 findings, 2 config or usage error
 Roles: ${ROLES.join(', ')}. Without flags, asks a short interview (plans/archive/durable first). With --yes or any role flag, runs non-interactively.
 The plans role is "program". Archive defaults to <program path>/0-done when not given.`,
   archive: `doc-it check archive [--root <dir>] [--stale-hours N] [--summary] [--json]
---summary: counts per finding kind, done_unclosed and done_closed_unverified in full, at most 10 entries of every other list ("+N more"). JSON keeps all lists.
+--summary: counts per finding kind, done_unclosed, done_closed_unverified and done_board_mismatch in full, at most 10 entries of every other list ("+N more"). JSON keeps all lists.
 Config field archive_since (YYYY-MM-DD, default unset): archive packages with no board and no CLOSEOUT whose last commit (or newest file mtime outside git) predates it are counted in legacy_count instead of done_without_closeout; a date later than today is a config error (exit 2). done_unclosed and done_closed_unverified are never hidden.
-Read-only. Reports done_unclosed (archive package whose status.json has closed:false), done_closed_unverified (closed:true that the board writer's freeze does not back: no close history entry by conclude-it, no board_sha256, or a board changed after the close), done_without_closeout (no status.json and no CLOSEOUT.md), stale_active (active package whose board updated_at is older than --stale-hours while newer files exist) and unowned (top-level paths with no role).
+Read-only. Reports done_unclosed (archive package whose status.json has closed:false), done_closed_unverified (closed:true that the board writer's freeze does not back: no close history entry by conclude-it, no board_sha256, or a board changed after the close), done_board_mismatch (an archived status.json whose implementation names another package, e.g. a copy of another package's closed board), done_without_closeout (no status.json and no CLOSEOUT.md), stale_active (active package whose board updated_at is older than --stale-hours while newer files exist) and unowned (top-level paths with no role).
 Exit 0 clean, 1 findings, 2 config missing ("run doc-it init") or usage error.`,
   closeout: `doc-it check closeout <file> [--root <dir>] [--repos name=path[,name=path]] [--json]
 Lints a CLOSEOUT.md table: one row per piece; shipped needs evidence, dropped needs a reason, carried needs a backlog link: an existing relative path (from the CLOSEOUT's folder or the repo root) or an http(s) URL. Failure names the row. Exit 0 / 1 / 2.
@@ -165,7 +165,8 @@ async function cmdInit(flags) {
 function readBoard(dir) {
   const f = path.join(dir, 'status.json');
   if (!isFile(f)) return null;
-  try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return { __invalid: true }; }
+  // A status.json that is not a JSON object (empty, `null`, a number) is still a board file: invalid, never "no board".
+  try { const j = JSON.parse(fs.readFileSync(f, 'utf8')); return j !== null && typeof j === 'object' && !Array.isArray(j) ? j : { __invalid: true }; } catch { return { __invalid: true }; }
 }
 function newestMtime(dir, skip) {
   let newest = 0;
@@ -230,7 +231,7 @@ function unprovenClose(board) {
 }
 
 function checkArchive(root, cfg, staleHours) {
-  const res = { done_unclosed: [], done_without_closeout: [], stale_active: [], unowned: [], done_closed_unverified: [] };
+  const res = { done_unclosed: [], done_without_closeout: [], stale_active: [], unowned: [], done_closed_unverified: [], done_board_mismatch: [] };
   const since = cfg.archive_since ? Date.parse(cfg.archive_since + 'T00:00:00Z') : null;
   let legacy = 0;
   const archives = archivePaths(cfg).map((p) => abs(root, p));
@@ -241,6 +242,10 @@ function checkArchive(root, cfg, staleHours) {
       const board = readBoard(dir);
       // An open board in the archive is always a finding: archive_since never hides done_unclosed.
       if (board) {
+        // CP-03 R4-A1-M7: a board names its package in `implementation`; one that names another package (a copy of
+        //   someone else's closed board) does not belong to this folder. A placeholder with no name or no JSON object
+        //   is already done_unclosed.
+        if (!board.__invalid && 'implementation' in board && board.implementation !== name) res.done_board_mismatch.push(rel);
         if (board.__invalid || board.closed !== true) res.done_unclosed.push(rel);
         else if (unprovenClose(board)) res.done_closed_unverified.push(rel);
         continue;
@@ -280,7 +285,7 @@ function cmdCheckArchive(flags) {
   const n = Object.values(res).reduce((s, a) => s + (Array.isArray(a) ? a.length : 0), 0);
   if (flags.json) out(JSON.stringify(res, null, 2));
   else {
-    const cap = (k) => (flags.summary && k !== 'done_unclosed' && k !== 'done_closed_unverified' ? 10 : Infinity);
+    const cap = (k) => (flags.summary && !['done_unclosed', 'done_closed_unverified', 'done_board_mismatch'].includes(k) ? 10 : Infinity);
     const sect = (k, title) => {
       if (!res[k].length) return;
       out(`${title} (${res[k].length}):`);
@@ -292,6 +297,7 @@ function cmdCheckArchive(flags) {
     sect('done_unclosed', 'archived but board not closed');
     sect('done_closed_unverified', 'archived, board says closed but no writer freeze backs it (set by hand or edited after close)');
     sect('done_without_closeout', 'archived with no board and no CLOSEOUT.md');
+    sect('done_board_mismatch', "archived board whose implementation is not its folder's name (a copy of another package's board)");
     sect('stale_active', 'active board older than stale limit while newer files exist');
     sect('unowned', 'paths with no role (unowned)');
     if (!n) out('clean');
