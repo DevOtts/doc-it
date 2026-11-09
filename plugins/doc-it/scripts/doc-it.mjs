@@ -202,7 +202,7 @@ function topLevelUnowned(root, cfg) {
 // Last-touched time of a package: last commit when tracked in git, else newest file mtime.
 function lastTouchedMs(root, dir) {
   try {
-    const t = execFileSync('git', ['log', '-1', '--format=%ct', '--', dir], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const t = execFileSync('git', ['--literal-pathspecs', 'log', '-1', '--format=%ct', '--', dir], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     if (t) return Number(t) * 1000;
   } catch { /* not a git repo */ }
   return newestMtime(dir, null);
@@ -343,8 +343,10 @@ const MAX_REF_DIGITS = 6;
 function gitOk(cwd, ...args) {
   try { execFileSync('git', args, { cwd, stdio: 'ignore' }); return true; } catch { return false; }
 }
+// CP-03 R6-A1-M9: only git's one trailing newline is dropped (a repo folder may end in a space); paths are never
+// quoted (core.quotePath=false). No caller parses a path list from it.
 function gitOut(cwd, ...args) {
-  try { return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; }
+  try { return execFileSync('git', ['-c', 'core.quotePath=false', ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).replace(/\r?\n$/, ''); } catch { return null; }
 }
 function commitResolves(gitRoot, sha) {
   if (!gitRoot) return /\d/.test(sha);
@@ -456,7 +458,7 @@ function lintCloseout(text, bases = [], gitRoot = null, ctx = { root: process.cw
   return { rows, problems };
 }
 function repoRoot(dir) {
-  try { return execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return process.cwd(); }
+  return gitOut(dir, 'rev-parse', '--show-toplevel') || process.cwd();
 }
 function cmdCheckCloseout(flags, pos) {
   if (!pos[0]) throw new Usage('usage: doc-it check closeout <file>');
@@ -490,7 +492,10 @@ function checkoutOne(repo, noFetch) {
   const local = git(repo, 'rev-parse', 'HEAD'); const remote = git(repo, 'rev-parse', `origin/${def}`);
   const behind = Number(git(repo, 'rev-list', '--count', `HEAD..origin/${def}`));
   const ahead = Number(git(repo, 'rev-list', '--count', `origin/${def}..HEAD`));
-  const dirty = git(repo, 'status', '--porcelain').split('\n').filter(Boolean).length;
+  // CP-03 R6-A1-M9: count entries NUL-separated (`-z`); a rename or copy entry carries its source path as one more field.
+  let dirty = 0;
+  { const f = execFileSync('git', ['-c', 'core.quotePath=false', 'status', '--porcelain=v1', '-z'], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).split('\0');
+    for (let i = 0; i < f.length; i++) { if (!f[i]) continue; dirty++; if (/^[RC]|^.[RC]/.test(f[i].slice(0, 2))) i++; } }
   Object.assign(r, { default_branch: def, local: local.slice(0, 12), remote: remote.slice(0, 12), behind, ahead, uncommitted: dirty });
   if (behind > 0) r.status = 'behind';
   return r;

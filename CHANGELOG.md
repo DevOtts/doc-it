@@ -13,6 +13,7 @@
 - CP-03 R2-L3: the `board_sha256` check covers the close entry (without its digest field), in step with build-it status-write, so a rewritten owner note is `done_closed_unverified`.
 - CP-03 R3-L1: a `shipped` URL needs a path after the host (`http://a.b` is refused; `https://a.b/x` still passes on format). `#n` stays format-only and the sha-is-not-shipping limit (R3-L2) is documented in STANDARD §5.
 - CP-03 R4-A1-M7: `check archive` reports `done_board_mismatch`, an archived `status.json` whose `implementation` names another package (a copy of another package's closed board passes the freeze check, so its name is what gives it away). A `status.json` that is not a JSON object (`null`) is `done_unclosed`, never read as "no board".
+- CP-03 R6-A1-M9: git output doc-it reads keeps its exact bytes: a repo top from `rev-parse --show-toplevel` loses only git's trailing newline (a repo folder ending in a space resolved to a missing folder), every call runs with `core.quotePath=false`, `check checkout` counts `status --porcelain=v1 -z` entries (a rename's source field is not counted twice), and the last-touched query uses `--literal-pathspecs` (a folder named `a*` no longer also matches `ab`).
 - Consumers that find doc-it missing print `[skip] doc-it not installed: <what was not checked>` and never PASS that check (D14).
 
 ## 0.0.0 (design only)
