@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -59,12 +60,16 @@ Every command accepts --help. Exit: 0 clean, 1 findings, 2 config or usage error
 Roles: ${ROLES.join(', ')}. Without flags, asks a short interview (plans/archive/durable first). With --yes or any role flag, runs non-interactively.
 The plans role is "program". Archive defaults to <program path>/0-done when not given.`,
   archive: `doc-it check archive [--root <dir>] [--stale-hours N] [--summary] [--json]
---summary: counts per finding kind, done_unclosed in full, at most 10 entries of every other list ("+N more"). JSON keeps all lists.
-Config field archive_since (YYYY-MM-DD, default unset): archive packages with no board and no CLOSEOUT whose last commit (or newest file mtime outside git) predates it are counted in legacy_count instead of done_without_closeout. done_unclosed is never hidden.
-Read-only. Reports done_unclosed (archive package whose status.json has closed:false), done_without_closeout (no status.json and no CLOSEOUT.md), stale_active (active package whose board updated_at is older than --stale-hours while newer files exist) and unowned (top-level paths with no role).
+--summary: counts per finding kind, done_unclosed, done_closed_unverified and done_board_mismatch in full, at most 10 entries of every other list ("+N more"). JSON keeps all lists.
+Config field archive_since (YYYY-MM-DD, default unset): archive packages with no board and no CLOSEOUT whose last commit (or newest file mtime outside git) predates it are counted in legacy_count instead of done_without_closeout; a date later than today is a config error (exit 2). done_unclosed and done_closed_unverified are never hidden.
+Read-only. Reports done_unclosed (archive package whose status.json has closed:false), done_closed_unverified (closed:true that the board writer's freeze does not back: no close history entry by conclude-it, no board_sha256, or a board changed after the close), done_board_mismatch (an archived status.json whose implementation names another package, e.g. a copy of another package's closed board), done_without_closeout (no status.json and no CLOSEOUT.md), stale_active (active package whose board updated_at is older than --stale-hours while newer files exist) and unowned (top-level paths with no role).
 Exit 0 clean, 1 findings, 2 config missing ("run doc-it init") or usage error.`,
-  closeout: `doc-it check closeout <file> [--root <dir>] [--json]
-Lints a CLOSEOUT.md table: one row per piece; shipped needs evidence, dropped needs a reason, carried needs a backlog link: an existing relative path (from the CLOSEOUT's folder or the repo root) or an http(s) URL. Failure names the row. Exit 0 / 1 / 2.`,
+  closeout: `doc-it check closeout <file> [--root <dir>] [--repos name=path[,name=path]] [--json]
+Lints a CLOSEOUT.md table: one row per piece; shipped needs evidence, dropped needs a reason, carried needs a backlog link: an existing relative path (from the CLOSEOUT's folder or the repo root) or an http(s) URL. Failure names the row. Exit 0 / 1 / 2.
+shipped evidence must cite at least one checkable thing: a PR or issue reference (#12, owner/repo#12), an http(s) URL with a dotted host and a path (https://host/x; a bare host is refused), repo@sha (7-40 hex) that resolves, an existing file path, or a bare commit sha (7-40 hex) that exists in the --root repo (outside a git repo: 7-40 hex with a digit). "yes", "done", "merged" alone are refused.
+repo@sha resolves in: the --root repo when <repo> is its folder or origin name, a sibling folder <root>/../<repo> that is a repo, or --repos <repo>=<path>. An unknown repo or a sha that is not a commit there fails the row, even next to other evidence.
+#n must be a positive number, no leading zero, at most 6 digits (#0 is refused). doc-it is offline: #n and URLs are format-checked only, and a sha that resolves is not proof that it shipped (it is not checked to be on the default branch).
+dropped reason must have at least 3 distinct words of 2+ letters ("." or "no no no" are refused).`,
   checkout: `doc-it check checkout <repo...> [--no-fetch] [--json]
 For each repo: fetch origin (unless --no-fetch), compare HEAD with origin/<default>. Exit 1 when behind, naming the local and remote sha. Also reports uncommitted changes in the working tree.`,
   expiry: `doc-it check expiry [--root <dir>] [--today YYYY-MM-DD] [--expiry-days N] [--json]
@@ -81,11 +86,12 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a.startsWith('--')) {
       const eq = a.indexOf('=');
-      if (eq > 0) { flags[a.slice(2, eq)] = a.slice(eq + 1); continue; }
+      const put = (k, v) => { flags[k] = (k === 'repos' && typeof flags[k] === 'string' && typeof v === 'string') ? `${flags[k]},${v}` : v; };
+      if (eq > 0) { put(a.slice(2, eq), a.slice(eq + 1)); continue; }
       const k = a.slice(2);
       const next = argv[i + 1];
-      if (['json', 'yes', 'force', 'help', 'no-fetch', 'summary'].includes(k) || next === undefined || next.startsWith('--')) flags[k] = true;
-      else { flags[k] = next; i++; }
+      if (['json', 'yes', 'force', 'help', 'no-fetch', 'summary'].includes(k) || next === undefined || next.startsWith('--')) put(k, true);
+      else { put(k, next); i++; }
     } else pos.push(a);
   }
   return { flags, pos };
@@ -96,6 +102,36 @@ const err = (s) => process.stderr.write(s + '\n');
 const abs = (root, p) => path.resolve(root, p);
 const isDir = (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
 const isFile = (p) => { try { return fs.statSync(p).isFile(); } catch { return false; } };
+// CP-03 R6: files are read only when they are regular files of at most READ_CAP bytes, opened O_NONBLOCK (a FIFO opens
+// without waiting for a writer) and fstat'ed on the same descriptor, so a FIFO, a device or a /dev symlink is never
+// waited on. `follow: false` (boards) also refuses any symlink (O_NOFOLLOW). Absent: null. Anything else: Unreadable.
+const READ_CAP = 64 << 20;
+class Unreadable extends Error {}
+const kindOf = (st) => (st.isFIFO() ? 'a FIFO' : st.isCharacterDevice() ? 'a character device' : st.isBlockDevice() ? 'a block device' : st.isSocket() ? 'a socket' : st.isDirectory() ? 'a directory' : 'not a regular file');
+function readRegular(file, { follow = true, cap = READ_CAP } = {}) {
+  const C = fs.constants;
+  let fd;
+  try { fd = fs.openSync(file, C.O_RDONLY | (C.O_NONBLOCK ?? 0) | (follow ? 0 : (C.O_NOFOLLOW ?? 0))); } catch (e) {
+    if (e.code === 'ENOENT' || e.code === 'ENOTDIR') { try { fs.lstatSync(file); } catch { return null; } throw new Unreadable(follow ? 'is a dangling symlink' : 'is a symlink'); }
+    if (e.code === 'ELOOP' || e.code === 'EMLINK' || e.code === 'EFTYPE') throw new Unreadable('is a symlink');
+    throw new Unreadable(`cannot be opened (${e.code || e.message})`);
+  }
+  try {
+    const st = fs.fstatSync(fd);
+    if (!follow && !C.O_NOFOLLOW && fs.lstatSync(file).isSymbolicLink()) throw new Unreadable('is a symlink');
+    if (!st.isFile()) throw new Unreadable(`is ${kindOf(st)}, not a regular file`);
+    if (st.size > cap) throw new Unreadable(`is ${st.size} bytes, over the ${cap}-byte limit`);
+    const chunks = []; let total = 0; const buf = Buffer.alloc(1 << 16);
+    for (;;) {
+      let n; try { n = fs.readSync(fd, buf, 0, buf.length, null); } catch (e) { throw new Unreadable(`cannot be read (${e.code || e.message})`); }
+      if (n === 0) break;
+      total += n; if (total > cap) throw new Unreadable(`grew past the ${cap}-byte limit while being read`);
+      chunks.push(Buffer.from(buf.subarray(0, n)));
+    }
+    return Buffer.concat(chunks).toString('utf8');
+  } finally { fs.closeSync(fd); }
+}
+const present = (p) => { try { fs.lstatSync(p); return true; } catch { return false; } };
 const num = (v, name) => { const n = Number(v); if (!Number.isFinite(n) || n < 0) throw new Usage(`${name} must be a non-negative number`); return n; };
 
 // ---------- config ----------
@@ -103,13 +139,15 @@ function loadConfig(root) {
   const f = path.join(root, '.doc-it', 'config.json');
   if (!isFile(f)) throw new Usage(`no .doc-it/config.json under ${root}: run doc-it init`);
   let cfg;
-  try { cfg = JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { throw new Usage(`invalid .doc-it/config.json (${e.message}): run doc-it init --force`); }
+  try { cfg = JSON.parse(readRegular(f)); } catch (e) { throw new Usage(`invalid .doc-it/config.json (${e.message}): run doc-it init --force`); }
   if (!cfg || typeof cfg !== 'object' || typeof cfg.roles !== 'object' || cfg.roles === null) throw new Usage('config.json has no "roles" map: run doc-it init --force');
   for (const [r, v] of Object.entries(cfg.roles)) {
     if (!ROLES.includes(r)) throw new Usage(`unknown role "${r}" in config.json (roles: ${ROLES.join(', ')})`);
     if (!Array.isArray(v) || v.some((x) => typeof x !== 'string')) throw new Usage(`role "${r}" must be an array of paths`);
   }
   if (cfg.archive_since !== undefined && cfg.archive_since !== null && (typeof cfg.archive_since !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(cfg.archive_since) || Number.isNaN(Date.parse(cfg.archive_since + 'T00:00:00Z')))) throw new Usage('archive_since in config.json must be YYYY-MM-DD');
+  // CP-03 R2-L9: a date in the future would move every boardless archive package into legacy_count.
+  if (cfg.archive_since && Date.parse(cfg.archive_since + 'T00:00:00Z') > Date.now()) throw new Usage(`archive_since ${cfg.archive_since} in config.json is later than today; it would hide every archive package without a board or CLOSEOUT`);
   return { expiry_days: DEFAULTS.expiry_days, stale_hours: DEFAULTS.stale_hours, ...cfg };
 }
 const rolePaths = (cfg, role) => (cfg.roles[role] || []);
@@ -156,8 +194,11 @@ async function cmdInit(flags) {
 // ---------- check archive ----------
 function readBoard(dir) {
   const f = path.join(dir, 'status.json');
-  if (!isFile(f)) return null;
-  try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return { __invalid: true }; }
+  // CP-03 R6: anything at that path is a board file. One that is not a regular file (a FIFO, a device, any symlink,
+  //   dangling or not) is invalid, never "no board" and never waited on.
+  if (!present(f)) return null;
+  // A status.json that is not a JSON object (empty, `null`, a number) is still a board file: invalid, never "no board".
+  try { const j = JSON.parse(readRegular(f, { follow: false })); return j !== null && typeof j === 'object' && !Array.isArray(j) ? j : { __invalid: true }; } catch { return { __invalid: true }; }
 }
 function newestMtime(dir, skip) {
   let newest = 0;
@@ -193,14 +234,36 @@ function topLevelUnowned(root, cfg) {
 // Last-touched time of a package: last commit when tracked in git, else newest file mtime.
 function lastTouchedMs(root, dir) {
   try {
-    const t = execFileSync('git', ['log', '-1', '--format=%ct', '--', dir], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const t = execFileSync('git', ['--literal-pathspecs', 'log', '-1', '--format=%ct', '--', dir], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     if (t) return Number(t) * 1000;
   } catch { /* not a git repo */ }
   return newestMtime(dir, null);
 }
 
+// A closed board must be backed by the writer's freeze (CP-03 A1-H1): the last "*" history entry is a close by
+// conclude-it carrying board_sha256, and that digest still matches the board. The digest is the board writer's
+// (build-it status-write >= 4.2.0): sha256 of the board as canonical JSON (keys sorted at every depth), leaving out
+// updated_at, rechecks and every history entry after the close entry; the close entry itself is covered without its
+// board_sha256 field (CP-03 R2-L3: its owner note cannot be rewritten). Returns the reason it is not backed, or null.
+const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const canonical = (v) => (Array.isArray(v) ? v.map(canonical) : isObj(v) ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canonical(v[k])])) : v);
+function unprovenClose(board) {
+  const h = Array.isArray(board.history) ? board.history : [];
+  let ci = -1;
+  for (let i = h.length - 1; i >= 0; i--) if (isObj(h[i]) && h[i].task === '*') { ci = h[i].to === 'closed' ? i : -2; break; }
+  if (ci < 0) return 'closed:true but no close history entry backs it';
+  const e = h[ci];
+  if (e.by !== 'conclude-it') return `close entry by "${e.by}", not conclude-it`;
+  if (typeof e.board_sha256 !== 'string') return 'close entry has no board_sha256 (not frozen by the board writer)';
+  const { updated_at: _u, rechecks: _r, ...rest } = board;
+  const { board_sha256: _d, ...entry } = e;
+  rest.history = [...h.slice(0, ci), entry];
+  if (crypto.createHash('sha256').update(JSON.stringify(canonical(rest))).digest('hex') !== e.board_sha256) return 'board changed after its close (board_sha256 mismatch)';
+  return null;
+}
+
 function checkArchive(root, cfg, staleHours) {
-  const res = { done_unclosed: [], done_without_closeout: [], stale_active: [], unowned: [] };
+  const res = { done_unclosed: [], done_without_closeout: [], stale_active: [], unowned: [], done_closed_unverified: [], done_board_mismatch: [] };
   const since = cfg.archive_since ? Date.parse(cfg.archive_since + 'T00:00:00Z') : null;
   let legacy = 0;
   const archives = archivePaths(cfg).map((p) => abs(root, p));
@@ -210,7 +273,15 @@ function checkArchive(root, cfg, staleHours) {
       const rel = path.relative(root, dir);
       const board = readBoard(dir);
       // An open board in the archive is always a finding: archive_since never hides done_unclosed.
-      if (board) { if (board.__invalid || board.closed !== true) res.done_unclosed.push(rel); continue; }
+      if (board) {
+        // CP-03 R4-A1-M7: a board names its package in `implementation`; one that names another package (a copy of
+        //   someone else's closed board) does not belong to this folder. A placeholder with no name or no JSON object
+        //   is already done_unclosed.
+        if (!board.__invalid && 'implementation' in board && board.implementation !== name) res.done_board_mismatch.push(rel);
+        if (board.__invalid || board.closed !== true) res.done_unclosed.push(rel);
+        else if (unprovenClose(board)) res.done_closed_unverified.push(rel);
+        continue;
+      }
       if (isFile(path.join(dir, 'CLOSEOUT.md'))) continue;
       if (since !== null && lastTouchedMs(root, dir) < since) { legacy++; continue; }
       res.done_without_closeout.push(rel);
@@ -246,7 +317,7 @@ function cmdCheckArchive(flags) {
   const n = Object.values(res).reduce((s, a) => s + (Array.isArray(a) ? a.length : 0), 0);
   if (flags.json) out(JSON.stringify(res, null, 2));
   else {
-    const cap = (k) => (flags.summary && k !== 'done_unclosed' ? 10 : Infinity);
+    const cap = (k) => (flags.summary && !['done_unclosed', 'done_closed_unverified', 'done_board_mismatch'].includes(k) ? 10 : Infinity);
     const sect = (k, title) => {
       if (!res[k].length) return;
       out(`${title} (${res[k].length}):`);
@@ -256,7 +327,9 @@ function cmdCheckArchive(flags) {
     if (flags.summary) out(`summary: ${Object.keys(res).filter((k) => Array.isArray(res[k])).map((k) => `${k}=${res[k].length}`).join(' ')}${res.legacy_count !== undefined ? ` legacy_count=${res.legacy_count}` : ''}`);
     else if (res.legacy_count) out(`legacy_count=${res.legacy_count} (before archive_since ${cfg.archive_since})`);
     sect('done_unclosed', 'archived but board not closed');
+    sect('done_closed_unverified', 'archived, board says closed but no writer freeze backs it (set by hand or edited after close)');
     sect('done_without_closeout', 'archived with no board and no CLOSEOUT.md');
+    sect('done_board_mismatch', "archived board whose implementation is not its folder's name (a copy of another package's board)");
     sect('stale_active', 'active board older than stale limit while newer files exist');
     sect('unowned', 'paths with no role (unowned)');
     if (!n) out('clean');
@@ -285,7 +358,101 @@ function validLink(raw, bases) {
     } catch { return false; }
   });
 }
-function lintCloseout(text, bases = []) {
+// CP-03 A1-M2: `shipped` evidence must cite something a reader can check, and a `dropped` reason must say why.
+// Evidence counts when it contains at least one of: a PR or issue reference (`#12`, `owner/repo#12`), an http(s) URL
+// with a dotted host and a path (R3-L1), `repo@sha` (7-40 hex) that resolves, an existing file path (same bases as backlog links), or a
+// bare commit sha (7-40 hex) that resolves to a commit in the repo under --root (outside a git repo: 7-40 hex with at
+// least one digit).
+// CP-03 R2-A1-M4: a citation that is present but false fails the row even when another citation passes:
+//   - `repo@sha` must resolve: the repo is the --root repo (name = its folder or its origin's repo name), a sibling
+//     folder `<root>/../<repo>` that is a repo of its own, or one named by `--repos name=path`; the sha must be a
+//     commit there. An unknown repo or a missing sha is refused, naming the row.
+//   - `#n` / `owner/repo#n` must be a positive number with no leading zero and at most 6 digits (`#0` is refused).
+//     doc-it is offline, so `#n` is format-only (STANDARD section 5, documented limit).
+// A reason counts when it has at least 3 DISTINCT words of 2+ letters and is not a placeholder (R2-L4).
+const HEX = /^[0-9a-f]{7,40}$/i;
+const MAX_REF_DIGITS = 6;
+function gitOk(cwd, ...args) {
+  try { execFileSync('git', args, { cwd, stdio: 'ignore' }); return true; } catch { return false; }
+}
+// CP-03 R6-A1-M9: only git's one trailing newline is dropped (a repo folder may end in a space); paths are never
+// quoted (core.quotePath=false). No caller parses a path list from it.
+function gitOut(cwd, ...args) {
+  try { return execFileSync('git', ['-c', 'core.quotePath=false', ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).replace(/\r?\n$/, ''); } catch { return null; }
+}
+function commitResolves(gitRoot, sha) {
+  if (!gitRoot) return /\d/.test(sha);
+  return gitOk(gitRoot, 'cat-file', '-e', `${sha}^{commit}`);
+}
+const real = (p) => { try { return fs.realpathSync.native(p); } catch { return null; } };
+// A folder counts as a repo only when it IS a repo's top level: `git -C` would otherwise walk up into an enclosing repo.
+function isRepoTop(dir) {
+  const r = real(dir); if (!r || !isDir(r)) return false;
+  const top = gitOut(r, 'rev-parse', '--show-toplevel');
+  return !!top && real(top) === r;
+}
+const repoKey = (name) => name.replace(/\.git$/i, '').split('/').filter(Boolean).pop()?.toLowerCase() || '';
+// --repos name=path[,name=path...] (repeatable). A bad entry is a usage error.
+function parseRepos(v) {
+  const m = new Map();
+  if (v === undefined) return m;
+  if (v === true) throw new Usage('--repos needs name=path');
+  for (const ent of String(v).split(',').map((x) => x.trim()).filter(Boolean)) {
+    const eq = ent.indexOf('=');
+    const name = eq > 0 ? ent.slice(0, eq).trim() : ''; const p = eq > 0 ? ent.slice(eq + 1).trim() : '';
+    if (!name || !p) throw new Usage(`--repos entry "${ent}" must be name=path`);
+    m.set(repoKey(name), path.resolve(p));
+  }
+  return m;
+}
+// Where `<name>@sha` lives: { dir } or { why } (why the repo could not be found).
+function resolveRepo(name, ctx) {
+  const key = repoKey(name);
+  const pinned = ctx.repos.get(key);
+  if (pinned) return isRepoTop(pinned) ? { dir: pinned } : { why: `--repos ${key}=${pinned} is not a git repository's top folder` };
+  const top = ctx.gitTop;
+  if (top) {
+    if (path.basename(top).toLowerCase() === key) return { dir: top };
+    const origin = gitOut(top, 'remote', 'get-url', 'origin');
+    if (origin && repoKey(origin.replace(/^.*[:/]([^:/]+\/[^:/]+)$/, '$1')) === key) return { dir: top };
+  }
+  const sib = path.join(path.dirname(top || ctx.root), key);
+  if (isRepoTop(sib)) return { dir: sib };
+  return { why: `no repo "${key}": not the --root repo (folder or origin name), no sibling folder ../${key}, not in --repos name=path` };
+}
+// Returns { cited, bad: [why...] }.
+function evidenceCites(detail, bases, gitRoot, ctx) {
+  const t = detail.replace(/`/g, ' ');
+  let cited = false; const bad = [];
+  for (const m of t.matchAll(/(^|[\s(\[,;:])((?:[\w.-]+\/[\w.-]+)?#(\d+))\b/g)) {
+    const n = m[3];
+    if (/^0/.test(n) || n.length > MAX_REF_DIGITS) bad.push(`${m[2]} is not a PR or issue number (positive, no leading zero, at most ${MAX_REF_DIGITS} digits)`);
+    else cited = true;
+  }
+  const tokens = t.split(/\s+/).map((x) => x.replace(/^[(\[<"']+|[)\]>"'.,;:!?]+$/g, '')).filter(Boolean);
+  for (let tok of tokens) {
+    const md = tok.match(/^\[[^\]]*\]\(([^)]+)\)$/); if (md) tok = md[1];
+    // CP-03 R3-L1: a URL counts only with a path after the host (`http://a.b` names no PR, commit or record).
+    if (/^https?:\/\//i.test(tok)) { if (/^https?:\/\/[a-z0-9-]+(\.[a-z0-9-]+)+(:\d+)?\/[^\s/?#]\S*$/i.test(tok)) cited = true; continue; }
+    const at = tok.match(/^([\w./-]+)@([0-9a-f]{7,40})$/i);
+    if (at) {
+      const repo = resolveRepo(at[1], ctx);
+      if (repo.why) bad.push(`${tok} does not resolve: ${repo.why}`);
+      else if (!gitOk(repo.dir, 'cat-file', '-e', `${at[2]}^{commit}`)) bad.push(`${tok} does not resolve: ${at[2]} is not a commit in ${repo.dir}`);
+      else cited = true;
+      continue;
+    }
+    if (HEX.test(tok)) { if (commitResolves(gitRoot, tok)) cited = true; continue; }
+    if (/[/.]/.test(tok) && validLink(tok, bases)) cited = true;
+  }
+  return { cited, bad };
+}
+function reasonSays(detail) {
+  if (blank(detail)) return false;
+  const words = detail.split(/\s+/).filter((w) => (w.match(/\p{L}/gu) || []).length >= 2).map((w) => w.toLowerCase().replace(/[^\p{L}\p{N}]/gu, ''));
+  return new Set(words).size >= 3;
+}
+function lintCloseout(text, bases = [], gitRoot = null, ctx = { root: process.cwd(), gitTop: null, repos: new Map() }) {
   const problems = []; let rows = 0;
   const lines = text.replace(/<!--[\s\S]*?-->/g, '').split('\n');
   let cols = null;
@@ -304,8 +471,17 @@ function lintCloseout(text, bases = []) {
     const link = cols.link >= 0 ? (cells[cols.link] || '') : '';
     if (blank(piece) && !cells[0]) { continue; }
     rows++;
-    if (disp === 'shipped') { if (blank(detail)) problems.push(`row "${piece}": shipped needs evidence`); }
-    else if (disp === 'dropped') { if (blank(detail)) problems.push(`row "${piece}": dropped needs a reason`); }
+    if (disp === 'shipped') {
+      if (blank(detail)) problems.push(`row "${piece}": shipped needs evidence`);
+      else {
+        const ev = evidenceCites(detail, bases, gitRoot, ctx);
+        if (ev.bad.length) for (const b of ev.bad) problems.push(`row "${piece}": shipped evidence ${b}; got "${detail}"`);
+        else if (!ev.cited) problems.push(`row "${piece}": shipped evidence must cite something checkable (a #PR or issue, an http(s) URL with a path, repo@sha that resolves, a commit sha that exists in this repo, or an existing path); got "${detail}"`);
+      }
+    } else if (disp === 'dropped') {
+      if (blank(detail)) problems.push(`row "${piece}": dropped needs a reason`);
+      else if (!reasonSays(detail)) problems.push(`row "${piece}": dropped needs a reason of at least 3 distinct words; got "${detail}"`);
+    }
     else if (disp === 'carried') {
       if (blank(link) || !validLink(link, bases)) problems.push(`row "${piece}": carried needs a backlog link (an existing relative path or an http(s) URL; got "${link}")`);
     } else problems.push(`row "${piece}": disposition must be shipped, dropped or carried (got "${cells[cols.disp] || ''}")`);
@@ -314,14 +490,21 @@ function lintCloseout(text, bases = []) {
   return { rows, problems };
 }
 function repoRoot(dir) {
-  try { return execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return process.cwd(); }
+  return gitOut(dir, 'rev-parse', '--show-toplevel') || process.cwd();
 }
 function cmdCheckCloseout(flags, pos) {
   if (!pos[0]) throw new Usage('usage: doc-it check closeout <file>');
   if (!isFile(pos[0])) throw new Usage(`not a file: ${pos[0]}`);
   const file = path.resolve(pos[0]);
-  const bases = [path.dirname(file), path.resolve(flags.root || repoRoot(path.dirname(file)))];
-  const r = lintCloseout(fs.readFileSync(file, 'utf8'), bases);
+  const root = path.resolve(flags.root || repoRoot(path.dirname(file)));
+  const bases = [path.dirname(file), root];
+  let gitRoot = null;
+  try { execFileSync('git', ['rev-parse', '--verify', '-q', 'HEAD'], { cwd: root, stdio: 'ignore' }); gitRoot = root; } catch { /* not a git repo, or no commits */ }
+  const repos = parseRepos(flags.repos);
+  const gitTop = gitOut(root, 'rev-parse', '--show-toplevel');
+  let text; try { text = readRegular(file); } catch (e) { if (e instanceof Unreadable) throw new Usage(`not a readable file: ${pos[0]} ${e.message}`); throw e; }
+  if (text === null) throw new Usage(`not a file: ${pos[0]}`);
+  const r = lintCloseout(text, bases, gitRoot, { root, gitTop: gitTop ? (real(gitTop) || gitTop) : null, repos });
   if (flags.json) out(JSON.stringify(r, null, 2));
   else if (r.problems.length) r.problems.forEach((p) => out(`FAIL ${p}`));
   else out(`ok: ${r.rows} piece(s)`);
@@ -343,7 +526,10 @@ function checkoutOne(repo, noFetch) {
   const local = git(repo, 'rev-parse', 'HEAD'); const remote = git(repo, 'rev-parse', `origin/${def}`);
   const behind = Number(git(repo, 'rev-list', '--count', `HEAD..origin/${def}`));
   const ahead = Number(git(repo, 'rev-list', '--count', `origin/${def}..HEAD`));
-  const dirty = git(repo, 'status', '--porcelain').split('\n').filter(Boolean).length;
+  // CP-03 R6-A1-M9: count entries NUL-separated (`-z`); a rename or copy entry carries its source path as one more field.
+  let dirty = 0;
+  { const f = execFileSync('git', ['-c', 'core.quotePath=false', 'status', '--porcelain=v1', '-z'], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).split('\0');
+    for (let i = 0; i < f.length; i++) { if (!f[i]) continue; dirty++; if (/^[RC]|^.[RC]/.test(f[i].slice(0, 2))) i++; } }
   Object.assign(r, { default_branch: def, local: local.slice(0, 12), remote: remote.slice(0, 12), behind, ahead, uncommitted: dirty });
   if (behind > 0) r.status = 'behind';
   return r;
@@ -382,7 +568,9 @@ function cmdCheckExpiry(flags) {
     const base = abs(root, p);
     const files = isFile(base) ? [base] : walkMd(base);
     for (const f of files) {
-      const head = fs.readFileSync(f, 'utf8').split('\n').slice(0, 40).join('\n');
+      let text; try { text = readRegular(f); } catch (e) { if (e instanceof Unreadable) { res.missing_verified.push(path.relative(root, f)); continue; } throw e; }
+      if (text === null) continue;
+      const head = text.split('\n').slice(0, 40).join('\n');
       const m = head.match(/^verified:\s*["']?(\d{4}-\d{2}-\d{2})/m);
       const rel = path.relative(root, f);
       if (!m) { res.missing_verified.push(rel); continue; }
