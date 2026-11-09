@@ -102,6 +102,36 @@ const err = (s) => process.stderr.write(s + '\n');
 const abs = (root, p) => path.resolve(root, p);
 const isDir = (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
 const isFile = (p) => { try { return fs.statSync(p).isFile(); } catch { return false; } };
+// CP-03 R6: files are read only when they are regular files of at most READ_CAP bytes, opened O_NONBLOCK (a FIFO opens
+// without waiting for a writer) and fstat'ed on the same descriptor, so a FIFO, a device or a /dev symlink is never
+// waited on. `follow: false` (boards) also refuses any symlink (O_NOFOLLOW). Absent: null. Anything else: Unreadable.
+const READ_CAP = 64 << 20;
+class Unreadable extends Error {}
+const kindOf = (st) => (st.isFIFO() ? 'a FIFO' : st.isCharacterDevice() ? 'a character device' : st.isBlockDevice() ? 'a block device' : st.isSocket() ? 'a socket' : st.isDirectory() ? 'a directory' : 'not a regular file');
+function readRegular(file, { follow = true, cap = READ_CAP } = {}) {
+  const C = fs.constants;
+  let fd;
+  try { fd = fs.openSync(file, C.O_RDONLY | (C.O_NONBLOCK ?? 0) | (follow ? 0 : (C.O_NOFOLLOW ?? 0))); } catch (e) {
+    if (e.code === 'ENOENT' || e.code === 'ENOTDIR') { try { fs.lstatSync(file); } catch { return null; } throw new Unreadable(follow ? 'is a dangling symlink' : 'is a symlink'); }
+    if (e.code === 'ELOOP' || e.code === 'EMLINK' || e.code === 'EFTYPE') throw new Unreadable('is a symlink');
+    throw new Unreadable(`cannot be opened (${e.code || e.message})`);
+  }
+  try {
+    const st = fs.fstatSync(fd);
+    if (!follow && !C.O_NOFOLLOW && fs.lstatSync(file).isSymbolicLink()) throw new Unreadable('is a symlink');
+    if (!st.isFile()) throw new Unreadable(`is ${kindOf(st)}, not a regular file`);
+    if (st.size > cap) throw new Unreadable(`is ${st.size} bytes, over the ${cap}-byte limit`);
+    const chunks = []; let total = 0; const buf = Buffer.alloc(1 << 16);
+    for (;;) {
+      let n; try { n = fs.readSync(fd, buf, 0, buf.length, null); } catch (e) { throw new Unreadable(`cannot be read (${e.code || e.message})`); }
+      if (n === 0) break;
+      total += n; if (total > cap) throw new Unreadable(`grew past the ${cap}-byte limit while being read`);
+      chunks.push(Buffer.from(buf.subarray(0, n)));
+    }
+    return Buffer.concat(chunks).toString('utf8');
+  } finally { fs.closeSync(fd); }
+}
+const present = (p) => { try { fs.lstatSync(p); return true; } catch { return false; } };
 const num = (v, name) => { const n = Number(v); if (!Number.isFinite(n) || n < 0) throw new Usage(`${name} must be a non-negative number`); return n; };
 
 // ---------- config ----------
@@ -109,7 +139,7 @@ function loadConfig(root) {
   const f = path.join(root, '.doc-it', 'config.json');
   if (!isFile(f)) throw new Usage(`no .doc-it/config.json under ${root}: run doc-it init`);
   let cfg;
-  try { cfg = JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { throw new Usage(`invalid .doc-it/config.json (${e.message}): run doc-it init --force`); }
+  try { cfg = JSON.parse(readRegular(f)); } catch (e) { throw new Usage(`invalid .doc-it/config.json (${e.message}): run doc-it init --force`); }
   if (!cfg || typeof cfg !== 'object' || typeof cfg.roles !== 'object' || cfg.roles === null) throw new Usage('config.json has no "roles" map: run doc-it init --force');
   for (const [r, v] of Object.entries(cfg.roles)) {
     if (!ROLES.includes(r)) throw new Usage(`unknown role "${r}" in config.json (roles: ${ROLES.join(', ')})`);
@@ -164,9 +194,11 @@ async function cmdInit(flags) {
 // ---------- check archive ----------
 function readBoard(dir) {
   const f = path.join(dir, 'status.json');
-  if (!isFile(f)) return null;
+  // CP-03 R6: anything at that path is a board file. One that is not a regular file (a FIFO, a device, any symlink,
+  //   dangling or not) is invalid, never "no board" and never waited on.
+  if (!present(f)) return null;
   // A status.json that is not a JSON object (empty, `null`, a number) is still a board file: invalid, never "no board".
-  try { const j = JSON.parse(fs.readFileSync(f, 'utf8')); return j !== null && typeof j === 'object' && !Array.isArray(j) ? j : { __invalid: true }; } catch { return { __invalid: true }; }
+  try { const j = JSON.parse(readRegular(f, { follow: false })); return j !== null && typeof j === 'object' && !Array.isArray(j) ? j : { __invalid: true }; } catch { return { __invalid: true }; }
 }
 function newestMtime(dir, skip) {
   let newest = 0;
@@ -470,7 +502,9 @@ function cmdCheckCloseout(flags, pos) {
   try { execFileSync('git', ['rev-parse', '--verify', '-q', 'HEAD'], { cwd: root, stdio: 'ignore' }); gitRoot = root; } catch { /* not a git repo, or no commits */ }
   const repos = parseRepos(flags.repos);
   const gitTop = gitOut(root, 'rev-parse', '--show-toplevel');
-  const r = lintCloseout(fs.readFileSync(file, 'utf8'), bases, gitRoot, { root, gitTop: gitTop ? (real(gitTop) || gitTop) : null, repos });
+  let text; try { text = readRegular(file); } catch (e) { if (e instanceof Unreadable) throw new Usage(`not a readable file: ${pos[0]} ${e.message}`); throw e; }
+  if (text === null) throw new Usage(`not a file: ${pos[0]}`);
+  const r = lintCloseout(text, bases, gitRoot, { root, gitTop: gitTop ? (real(gitTop) || gitTop) : null, repos });
   if (flags.json) out(JSON.stringify(r, null, 2));
   else if (r.problems.length) r.problems.forEach((p) => out(`FAIL ${p}`));
   else out(`ok: ${r.rows} piece(s)`);
@@ -534,7 +568,9 @@ function cmdCheckExpiry(flags) {
     const base = abs(root, p);
     const files = isFile(base) ? [base] : walkMd(base);
     for (const f of files) {
-      const head = fs.readFileSync(f, 'utf8').split('\n').slice(0, 40).join('\n');
+      let text; try { text = readRegular(f); } catch (e) { if (e instanceof Unreadable) { res.missing_verified.push(path.relative(root, f)); continue; } throw e; }
+      if (text === null) continue;
+      const head = text.split('\n').slice(0, 40).join('\n');
       const m = head.match(/^verified:\s*["']?(\d{4}-\d{2}-\d{2})/m);
       const rel = path.relative(root, f);
       if (!m) { res.missing_verified.push(rel); continue; }
